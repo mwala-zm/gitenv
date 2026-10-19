@@ -1,0 +1,24 @@
+# Maintainer: Mwala Mulenga <mwalamulenga.zt@gmail.com>
+# Rendered by packaging/render.sh in github.com/mwala-zm/gitenv on each
+# release and pushed to the AUR; edit the .in file, not the AUR copy.
+pkgname=gitenv-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Terminal UI that keeps you on the right git identity for the repo you're in"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mwala-zm/gitenv"
+license=('MIT')
+depends=('git' 'gcc-libs' 'glibc')
+provides=('gitenv')
+conflicts=('gitenv')
+source_x86_64=("$url/releases/download/v$pkgver/gitenv-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/gitenv-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('@SHA_LINUX_INTEL@')
+sha256sums_aarch64=('@SHA_LINUX_ARM@')
+
+package() {
+  cd "gitenv-$CARCH-unknown-linux-gnu"
+  install -Dm755 gitenv "$pkgdir/usr/bin/gitenv"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

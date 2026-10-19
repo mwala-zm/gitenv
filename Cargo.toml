@@ -10,6 +10,7 @@ homepage = "https://github.com/mwala-zm/gitenv"
 keywords = ["git", "identity", "tui", "cli", "profiles"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
+exclude = [".github/", "packaging/"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -17,6 +18,32 @@ directories = "6.0.0"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"
+
+# Debian package built by cargo-deb in the release workflow.
+[package.metadata.deb]
+maintainer = "Mwala Mulenga <mwalamulenga.zt@gmail.com>"
+section = "vcs"
+priority = "optional"
+depends = "$auto, git"
+extended-description = """\
+gitenv shows which identity git will use in the current repository, whether
+it matches one of your saved profiles, and lets you switch with one key
+press. `gitenv check` does the same without a UI for pre-commit hooks."""
+assets = [
+  ["target/release/gitenv", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/gitenv/README.md", "644"],
+]
+
+# RPM built by cargo-generate-rpm in the release workflow.
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/release/gitenv", dest = "/usr/bin/gitenv", mode = "755" },
+  { source = "LICENSE", dest = "/usr/share/doc/gitenv/LICENSE", mode = "644", doc = true },
+  { source = "README.md", dest = "/usr/share/doc/gitenv/README.md", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+git = "*"
 
 [profile.release]
 strip = true

@@ -27,22 +27,40 @@ one of your saved profiles, and lets you switch with one key press.
 
 ## Install
 
-With a Rust toolchain:
+gitenv shells out to `git`, so git must be installed.
+
+**Homebrew** (macOS and Linux):
+
+```sh
+brew install mwala-zm/tap/gitenv
+```
+
+**Debian, Ubuntu** and **Fedora, RHEL, openSUSE**: each
+[GitHub release](https://github.com/mwala-zm/gitenv/releases/latest) has a
+`.deb` and an `.rpm` for x86_64 and arm64. Download the one for your machine
+and hand it to your package manager:
+
+```sh
+sudo apt install ./gitenv_<version>_amd64.deb
+sudo dnf install ./gitenv-<version>.x86_64.rpm
+```
+
+**Arch Linux**, from the AUR:
+
+```sh
+yay -S gitenv-bin
+```
+
+**Cargo**, from crates.io, or prebuilt with
+[cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
 
 ```sh
 cargo install gitenv
-```
-
-Prebuilt binaries for macOS and Linux are attached to each
-[GitHub release](https://github.com/mwala-zm/gitenv/releases). Download the
-archive for your platform, unpack it, and put `gitenv` somewhere on your
-`PATH`. If you have [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
-
-```sh
 cargo binstall gitenv
 ```
 
-gitenv shells out to `git`, so git must be installed.
+**By hand**: prebuilt archives for macOS and Linux are attached to each
+release. Unpack one and put `gitenv` somewhere on your `PATH`.
 
 ## Use
 

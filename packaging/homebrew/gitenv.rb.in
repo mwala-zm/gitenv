@@ -1,0 +1,40 @@
+# Homebrew formula for gitenv. Rendered by packaging/render.sh on each
+# release and pushed to github.com/mwala-zm/homebrew-tap; edit the .in file,
+# not the copy in the tap.
+class Gitenv < Formula
+  desc "Terminal UI that keeps you on the right git identity for the repo you're in"
+  homepage "https://github.com/mwala-zm/gitenv"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/mwala-zm/gitenv/releases/download/v@VERSION@/gitenv-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_MACOS_ARM@"
+    end
+    on_intel do
+      url "https://github.com/mwala-zm/gitenv/releases/download/v@VERSION@/gitenv-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_MACOS_INTEL@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/mwala-zm/gitenv/releases/download/v@VERSION@/gitenv-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_ARM@"
+    end
+    on_intel do
+      url "https://github.com/mwala-zm/gitenv/releases/download/v@VERSION@/gitenv-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_INTEL@"
+    end
+  end
+
+  def install
+    bin.install "gitenv"
+    doc.install "README.md"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/gitenv --version")
+  end
+end

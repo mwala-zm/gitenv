@@ -1,8 +1,11 @@
 name: Release
 
 # Pushing a tag like v0.1.0 builds binaries for each platform and attaches
-# them to a GitHub release. Archive names follow the convention that
+# them to a GitHub release together with .deb and .rpm packages, then fans
+# out to the package managers: the Homebrew tap always, crates.io and the
+# AUR when their secrets are set. Archive names follow the convention that
 # cargo-binstall looks for, so `cargo binstall gitenv` works too.
+# See packaging/README.md for the secrets each channel needs.
 
 on:
   push:
@@ -12,6 +15,18 @@ permissions:
   contents: write
 
 jobs:
+  secrets:
+    # A job-level `if` cannot read secrets, so report which optional ones exist.
+    runs-on: ubuntu-latest
+    outputs:
+      crates: ${{ steps.check.outputs.crates }}
+      aur: ${{ steps.check.outputs.aur }}
+    steps:
+      - id: check
+        run: |
+          echo "crates=${{ secrets.CARGO_REGISTRY_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+          echo "aur=${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}" >> "$GITHUB_OUTPUT"
+
   build:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -30,19 +45,93 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Check tag matches Cargo.toml
+        shell: bash
+        run: |
+          crate=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "v$crate" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
       - run: cargo build --release --target ${{ matrix.target }}
-      - name: Package
+      - name: Package archive
         run: |
           name=gitenv-${{ matrix.target }}
           mkdir "$name"
           cp target/${{ matrix.target }}/release/gitenv README.md LICENSE "$name"/
           tar czf "$name.tar.gz" "$name"
+      - name: Install .deb and .rpm packagers
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - name: Package .deb and .rpm
+        if: runner.os == 'Linux'
+        run: |
+          cargo deb --no-build --target ${{ matrix.target }}
+          cargo generate-rpm --target ${{ matrix.target }}
+          ls target/${{ matrix.target }}/debian target/${{ matrix.target }}/generate-rpm
       - uses: softprops/action-gh-release@v2
         with:
-          files: gitenv-${{ matrix.target }}.tar.gz
+          files: |
+            gitenv-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/debian/*.deb
+            target/${{ matrix.target }}/generate-rpm/*.rpm
 
-  publish:
+  homebrew:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern 'gitenv-*.tar.gz' --dir assets
+      - name: Render formula
+        run: packaging/render.sh "${GITHUB_REF_NAME#v}" assets out
+      - name: Push formula to mwala-zm/homebrew-tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone --depth 1 git@github.com:mwala-zm/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp out/gitenv.rb tap/Formula/gitenv.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/gitenv.rb
+          git commit -m "gitenv ${GITHUB_REF_NAME#v}"
+          git push
+
+  aur:
+    needs: [secrets, build]
+    if: needs.secrets.outputs.aur == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern 'gitenv-*.tar.gz' --dir assets
+      - name: Render PKGBUILD
+        run: packaging/render.sh "${GITHUB_REF_NAME#v}" assets out
+      - uses: KSXGitHub/github-actions-deploy-aur@v4
+        with:
+          pkgname: gitenv-bin
+          pkgbuild: out/PKGBUILD
+          commit_username: Mwala Mulenga
+          commit_email: mwalamulenga.zt@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: Update to ${{ github.ref_name }}
+          test: true
+
+  crates:
+    needs: [secrets, build]
+    if: needs.secrets.outputs.crates == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
