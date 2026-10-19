@@ -1,0 +1,24 @@
+[package]
+name = "gitenv"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI that keeps you on the right git identity for the repo you're in"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/mwala-zm/gitenv"
+homepage = "https://github.com/mwala-zm/gitenv"
+keywords = ["git", "identity", "tui", "cli", "profiles"]
+categories = ["command-line-utilities", "development-tools"]
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1.0.104"
+directories = "6.0.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.6"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
