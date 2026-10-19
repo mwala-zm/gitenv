@@ -51,6 +51,7 @@ Run it inside any repository, or point it at one:
 ```sh
 cd ~/work/acme/api && gitenv
 gitenv ~/work/acme/api
+gitenv check             # no UI: just the exit code, for hooks and scripts
 ```
 
 | Key | Action |
@@ -67,6 +68,31 @@ gitenv ~/work/acme/api
 Applying a profile sets `user.name`, `user.email`, and optionally
 `user.signingkey` and `core.sshCommand` in the repo's local config. Local
 config always wins over `~/.gitconfig`, so the global identity is left alone.
+
+## Hooks
+
+`gitenv check` exits 0 when the repo's identity matches a saved profile, 1
+when it does not, and 2 when it could not look (not a repo, config
+unreadable, git missing). It prints nothing on success, so it makes a quiet
+pre-commit hook:
+
+```sh
+#!/bin/sh
+# .git/hooks/pre-commit
+exec gitenv check
+```
+
+To guard every repository you have cloned, point git at one hooks directory
+for all of them and put the script there instead:
+
+```sh
+git config --global core.hooksPath ~/.githooks
+mkdir -p ~/.githooks && printf '#!/bin/sh\nexec gitenv check\n' > ~/.githooks/pre-commit
+chmod +x ~/.githooks/pre-commit
+```
+
+On a mismatch the commit is refused and gitenv prints what git would have
+used and which repo to open it in.
 
 ## Profiles
 
@@ -113,6 +139,7 @@ The code is small and split by responsibility:
 
 - `src/main.rs` sets up the terminal and runs the draw, wait, update loop.
 - `src/app.rs` holds all state and maps key presses to actions.
+- `src/check.rs` is the `check` subcommand used from hooks.
 - `src/form.rs` is the profile editor form and its validation.
 - `src/ui.rs` draws the screen from that state and never mutates it.
 - `src/profile.rs` defines profiles and loads and saves the config file.
@@ -121,7 +148,6 @@ The code is small and split by responsibility:
 ## Roadmap
 
 - Rules that pick a profile automatically from the remote URL or directory.
-- A `check` mode for pre-commit and pre-push hooks that fails on a mismatch.
 
 ## License
 
