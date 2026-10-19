@@ -34,7 +34,9 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
+          # Intel macOS is cross-compiled on the arm64 runner: Apple's
+          # toolchain links both architectures and macos-13 is retired.
+          - os: macos-latest
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
