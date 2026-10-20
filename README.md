@@ -78,6 +78,7 @@ gitenv status            # what git would use here, and whether it is right
 gitenv status --short    # one token for a shell prompt, e.g. `acme`
 gitenv apply acme        # write a profile into .git/config without the UI
 gitenv apply             # apply whichever profile's rules claim this repo
+gitenv scan ~/work       # every repo under a directory, and its verdict
 ```
 
 | Key | Action |
@@ -119,6 +120,26 @@ when = "git rev-parse --is-inside-work-tree"
 format = "[$output]($style) "
 style = "yellow"
 ```
+
+### Auditing many repositories
+
+`gitenv scan DIR` finds every repository under a directory and prints one
+line per repo with its verdict, then a summary:
+
+```
+STATUS PROFILE          REPO
+ok     acme             ~/work/acme/api
+wrong  personal -> acme ~/work/acme/web
+none   ?                ~/play/thing
+
+3 repositories, 1 on the right profile, 2 to look at
+```
+
+`--problems` hides the `ok` rows. `--fix` applies the expected profile to
+every repo a rule claims that is on the wrong identity, so after adding a
+rule you can bring all your clones in line at once. The exit code is 1 if
+anything still needs attention. Hidden directories, `node_modules` and
+`target` are skipped, and a repo's subdirectories are not searched.
 
 ### Shell completions
 

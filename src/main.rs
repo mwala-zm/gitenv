@@ -5,6 +5,7 @@ mod form;
 mod git;
 mod profile;
 mod rules;
+mod scan;
 mod ui;
 
 use std::io;
@@ -79,6 +80,24 @@ enum Command {
         /// Directory inside the repository
         path: Option<PathBuf>,
     },
+    /// List every repository under a directory and whether each is on
+    /// the right profile
+    ///
+    /// Prints a table and a summary. Exits 1 if any repository is on the
+    /// wrong profile or matches none. Hidden directories, node_modules and
+    /// target are skipped, and a repository's own subdirectories are not
+    /// searched for nested repositories.
+    Scan {
+        /// Directory to search (default: the current directory)
+        dir: Option<PathBuf>,
+        /// Only list repositories that need attention
+        #[arg(long, short)]
+        problems: bool,
+        /// Apply the expected profile wherever a rule claims a repo that
+        /// is on the wrong identity
+        #[arg(long)]
+        fix: bool,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// For example: `gitenv completions zsh > ~/.zfunc/_gitenv`.
@@ -107,6 +126,19 @@ fn main() -> Result<ExitCode> {
         }),
         Some(Command::Status { short, path }) => Ok(match resolve_dir(path) {
             Ok(dir) => cmd::status(short, &dir),
+            Err(err) => {
+                eprintln!("gitenv: {err:#}");
+                ExitCode::from(2)
+            }
+        }),
+        Some(Command::Scan { dir, problems, fix }) => Ok(match resolve_dir(dir) {
+            Ok(dir) => scan::run(
+                &dir,
+                &scan::Options {
+                    problems_only: problems,
+                    fix,
+                },
+            ),
             Err(err) => {
                 eprintln!("gitenv: {err:#}");
                 ExitCode::from(2)
