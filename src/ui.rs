@@ -123,16 +123,23 @@ fn render_form(frame: &mut Frame, form: &Form) {
             } else {
                 Style::new()
             };
+            // The active field scrolls to keep the cursor in view; the
+            // others show their start.
+            let offset = if i == form.field {
+                scroll_offset(form.cursor, value_width)
+            } else {
+                0
+            };
             Line::from(vec![
                 Span::styled(format!("{label:<label_width$}"), style),
-                Span::raw(tail(value, value_width)),
+                Span::raw(window(value, offset, value_width)),
             ])
         })
         .collect();
     lines.push(Line::from(""));
     lines.push(match &form.error {
         Some(err) => Line::from(err.clone().red()),
-        None => Line::from("Tab/↓ next field   Enter save   Esc cancel".dim()),
+        None => Line::from("Tab/↓ next field   ←→ Home End move   Enter save   Esc cancel".dim()),
     });
 
     frame.render_widget(Clear, area);
@@ -141,20 +148,27 @@ fn render_form(frame: &mut Frame, form: &Form) {
         area,
     );
 
-    // Put the terminal cursor at the end of the field being typed into.
-    let shown = form.values[form.field].chars().count().min(value_width) as u16;
-    let x = area.x + 1 + label_width as u16 + shown;
+    // Put the terminal cursor where the form's cursor is.
+    let offset = scroll_offset(form.cursor, value_width);
+    let x = area.x + 1 + label_width as u16 + (form.cursor - offset) as u16;
     let y = area.y + 1 + form.field as u16;
     if x < area.right() {
         frame.set_cursor_position((x, y));
     }
 }
 
-/// The last `width` characters of `s`, so the end of a long value stays
-/// visible while typing.
-fn tail(s: &str, width: usize) -> String {
-    let len = s.chars().count();
-    s.chars().skip(len.saturating_sub(width)).collect()
+/// How many characters to hide on the left so a cursor at `cursor` fits in
+/// `width` columns with one spare cell for the cursor itself.
+fn scroll_offset(cursor: usize, width: usize) -> usize {
+    if width == 0 {
+        return cursor;
+    }
+    cursor.saturating_sub(width - 1)
+}
+
+/// `width` characters of `s` starting `offset` characters in.
+fn window(s: &str, offset: usize, width: usize) -> String {
+    s.chars().skip(offset).take(width).collect()
 }
 
 fn render_header(frame: &mut Frame, area: Rect) {

@@ -146,6 +146,14 @@ impl App {
             (KeyCode::Tab, _) | (KeyCode::Down, _) => form.next_field(),
             (KeyCode::BackTab, _) | (KeyCode::Up, _) => form.prev_field(),
             (KeyCode::Backspace, _) => form.backspace(),
+            (KeyCode::Delete, _) => form.delete(),
+            (KeyCode::Left, _) => form.left(),
+            (KeyCode::Right, _) => form.right(),
+            (KeyCode::Home, _) | (KeyCode::Char('a'), KeyModifiers::CONTROL) => form.home(),
+            (KeyCode::End, _) | (KeyCode::Char('e'), KeyModifiers::CONTROL) => form.end(),
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => form.kill_to_start(),
+            (KeyCode::Char('k'), KeyModifiers::CONTROL) => form.kill_to_end(),
+            (KeyCode::Char('w'), KeyModifiers::CONTROL) => form.kill_word(),
             // Ctrl+A and friends arrive as Char('a') with a modifier; they
             // are shortcuts, not text.
             (KeyCode::Char(c), m)

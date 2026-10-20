@@ -29,6 +29,8 @@ pub struct Form {
     pub values: [String; 10],
     /// Which field has the cursor.
     pub field: usize,
+    /// Cursor position within the current field, in characters.
+    pub cursor: usize,
     /// `Some(index)` when editing an existing profile, `None` for a new one.
     pub editing: Option<usize>,
     pub error: Option<String>,
@@ -69,9 +71,28 @@ impl Form {
                     .join(", "),
             ],
             field: 0,
+            cursor: profile.name.chars().count(),
             editing: Some(index),
             error: None,
         }
+    }
+
+    fn len(&self) -> usize {
+        self.values[self.field].chars().count()
+    }
+
+    /// Byte offset of the cursor in the current field.
+    fn byte_at(&self, chars: usize) -> usize {
+        self.values[self.field]
+            .char_indices()
+            .nth(chars)
+            .map(|(i, _)| i)
+            .unwrap_or(self.values[self.field].len())
+    }
+
+    fn goto_field(&mut self, field: usize) {
+        self.field = field;
+        self.cursor = self.len();
     }
 
     pub fn title(&self) -> &'static str {
@@ -83,22 +104,83 @@ impl Form {
     }
 
     pub fn next_field(&mut self) {
-        self.field = (self.field + 1) % LABELS.len();
+        self.goto_field((self.field + 1) % LABELS.len());
     }
 
     pub fn prev_field(&mut self) {
-        self.field = (self.field + LABELS.len() - 1) % LABELS.len();
+        self.goto_field((self.field + LABELS.len() - 1) % LABELS.len());
     }
 
     pub fn insert(&mut self, c: char) {
         if !c.is_control() {
-            self.values[self.field].push(c);
+            let at = self.byte_at(self.cursor);
+            self.values[self.field].insert(at, c);
+            self.cursor += 1;
             self.error = None;
         }
     }
 
+    /// Delete the character before the cursor.
     pub fn backspace(&mut self) {
-        self.values[self.field].pop();
+        if self.cursor == 0 {
+            return;
+        }
+        self.cursor -= 1;
+        self.delete();
+    }
+
+    /// Delete the character under the cursor.
+    pub fn delete(&mut self) {
+        if self.cursor >= self.len() {
+            return;
+        }
+        let at = self.byte_at(self.cursor);
+        self.values[self.field].remove(at);
+    }
+
+    pub fn left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.len());
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.len();
+    }
+
+    /// Delete from the start of the field to the cursor (Ctrl+U).
+    pub fn kill_to_start(&mut self) {
+        let at = self.byte_at(self.cursor);
+        self.values[self.field].drain(..at);
+        self.cursor = 0;
+    }
+
+    /// Delete from the cursor to the end of the field (Ctrl+K).
+    pub fn kill_to_end(&mut self) {
+        let at = self.byte_at(self.cursor);
+        self.values[self.field].truncate(at);
+    }
+
+    /// Delete the word before the cursor (Ctrl+W), where a word ends at
+    /// whitespace or a path separator.
+    pub fn kill_word(&mut self) {
+        let chars: Vec<char> = self.values[self.field].chars().collect();
+        let mut start = self.cursor;
+        while start > 0 && is_boundary(chars[start - 1]) {
+            start -= 1;
+        }
+        while start > 0 && !is_boundary(chars[start - 1]) {
+            start -= 1;
+        }
+        let (from, to) = (self.byte_at(start), self.byte_at(self.cursor));
+        self.values[self.field].drain(from..to);
+        self.cursor = start;
     }
 
     /// Validate and turn the form into a profile. Uniqueness of the name
@@ -176,9 +258,82 @@ impl Form {
     }
 }
 
+fn is_boundary(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '/' | ',' | '=' | '@' | ':')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn typed(s: &str) -> Form {
+        let mut form = Form::new();
+        for c in s.chars() {
+            form.insert(c);
+        }
+        form
+    }
+
+    #[test]
+    fn cursor_moves_and_edits_in_the_middle() {
+        let mut form = typed("abd");
+        form.left();
+        form.insert('c');
+        assert_eq!(form.values[0], "abcd");
+        assert_eq!(form.cursor, 3);
+        form.home();
+        form.delete();
+        assert_eq!(form.values[0], "bcd");
+        form.end();
+        form.backspace();
+        assert_eq!(form.values[0], "bc");
+        form.right();
+        form.left();
+        form.left();
+        form.left();
+        assert_eq!(form.cursor, 0, "left stops at the start");
+        form.backspace();
+        assert_eq!(form.values[0], "bc", "backspace at the start is a no-op");
+    }
+
+    #[test]
+    fn cursor_handles_multibyte_characters() {
+        let mut form = typed("héllo");
+        form.left();
+        form.left();
+        form.left();
+        form.backspace();
+        assert_eq!(form.values[0], "hllo");
+        form.insert('ë');
+        assert_eq!(form.values[0], "hëllo");
+    }
+
+    #[test]
+    fn kill_shortcuts() {
+        let mut form = typed("/Users/ada/.ssh/id_acme");
+        form.kill_word();
+        assert_eq!(form.values[0], "/Users/ada/.ssh/");
+        form.kill_word();
+        assert_eq!(form.values[0], "/Users/ada/");
+        form.left();
+        form.left();
+        form.kill_to_end();
+        assert_eq!(form.values[0], "/Users/ad");
+        form.kill_to_start();
+        assert_eq!(form.values[0], "");
+        assert_eq!(form.cursor, 0);
+    }
+
+    #[test]
+    fn switching_fields_puts_the_cursor_at_the_end() {
+        let mut form = typed("abc");
+        form.home();
+        form.next_field();
+        form.insert('x');
+        form.prev_field();
+        assert_eq!(form.cursor, 3);
+        assert_eq!(form.values[1], "x");
+    }
 
     #[test]
     fn empty_optionals_become_none() {

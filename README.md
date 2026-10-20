@@ -191,6 +191,10 @@ used and which repo to open it in.
 On first run gitenv creates a config file seeded from your global git
 identity. Press `n` to add a profile or `e` to change one from inside the
 TUI, or edit the file directly with one `[[profiles]]` block per identity.
+In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
+`Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
+(delete to start/end) and `Ctrl-W` (delete the word before the cursor)
+work as in a shell.
 
 | Platform | Config path |
 |---|---|
