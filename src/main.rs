@@ -30,7 +30,10 @@ check   Exit 0 when the repo's identity matches a saved profile, 1 when it
 
 Options:
   -h, --help       Show this help
-  -V, --version    Show the version";
+  -V, --version    Show the version
+
+Environment:
+  GITENV_CONFIG    Path of the profiles file (default: a per-user config dir)";
 
 fn main() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();

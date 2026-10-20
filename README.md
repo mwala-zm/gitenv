@@ -127,6 +127,9 @@ TUI, or edit the file directly with one `[[profiles]]` block per identity.
 | Linux | `~/.config/gitenv/config.toml` |
 | Windows | `%APPDATA%\gitenv\config\config.toml` |
 
+Set `GITENV_CONFIG=/path/to/config.toml` to use a different file, for
+example one kept in a dotfiles repo.
+
 ```toml
 [[profiles]]
 name = "personal"

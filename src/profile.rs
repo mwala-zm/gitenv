@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+/// Environment variable that overrides the config file location.
+pub const CONFIG_ENV: &str = "GITENV_CONFIG";
+
 /// One git identity. Serialised as a `[[profiles]]` table in the config file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
@@ -30,10 +33,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Where the config lives. On macOS this is
+    /// Where the config lives. `GITENV_CONFIG` wins when set, so dotfile
+    /// managers and tests can point at any file. Otherwise on macOS this is
     /// `~/Library/Application Support/gitenv/config.toml`, on Linux
     /// `~/.config/gitenv/config.toml`.
     pub fn path() -> Result<PathBuf> {
+        if let Some(path) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(path));
+        }
         let dirs = ProjectDirs::from("", "", "gitenv")
             .context("could not determine a config directory for this user")?;
         Ok(dirs.config_dir().join("config.toml"))
