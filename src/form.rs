@@ -1,13 +1,14 @@
 //! The profile editor form. Plain data plus a few methods; the UI draws it
 //! and `App` decides what to do when it is submitted.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::git::git_bool;
 use crate::profile::{Profile, SigningFormat};
 use crate::rules;
 
-pub const LABELS: [&str; 9] = [
+pub const LABELS: [&str; 10] = [
     "Profile name",
     "Git user.name",
     "Git user.email",
@@ -17,6 +18,7 @@ pub const LABELS: [&str; 9] = [
     "SSH key path (optional)",
     "Remote rules (comma-separated)",
     "Path rules (comma-separated)",
+    "Extra git config (k=v, comma-sep.)",
 ];
 
 /// Width of the widest label plus a gap, for the UI to line values up.
@@ -24,7 +26,7 @@ pub const LABEL_WIDTH: usize = 32;
 
 #[derive(Debug, Clone, Default)]
 pub struct Form {
-    pub values: [String; 9],
+    pub values: [String; 10],
     /// Which field has the cursor.
     pub field: usize,
     /// `Some(index)` when editing an existing profile, `None` for a new one.
@@ -59,6 +61,12 @@ impl Form {
                     .unwrap_or_default(),
                 profile.remotes.join(", "),
                 profile.paths.join(", "),
+                profile
+                    .git
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ],
             field: 0,
             editing: Some(index),
@@ -106,6 +114,7 @@ impl Form {
             ssh_key,
             remotes,
             paths,
+            extra,
         ] = self.values.each_ref().map(|v| v.trim().to_string());
         if name.is_empty() {
             return Err("Profile name is required".into());
@@ -135,6 +144,17 @@ impl Form {
             ),
             None => None,
         };
+        let mut git = BTreeMap::new();
+        for pair in list(&extra) {
+            let Some((k, v)) = pair.split_once('=') else {
+                return Err(format!("Extra git config needs key=value, not '{pair}'"));
+            };
+            let k = k.trim();
+            if k.is_empty() || !k.contains('.') {
+                return Err(format!("'{k}' is not a git config key like section.name"));
+            }
+            git.insert(k.to_string(), v.trim().to_string());
+        }
         let sign_commits = match optional(sign_commits) {
             Some(s) => Some(
                 git_bool(&s).ok_or_else(|| format!("Sign commits must be yes or no, not '{s}'"))?,
@@ -149,6 +169,7 @@ impl Form {
             ssh_key: optional(ssh_key).map(PathBuf::from),
             signing_format,
             sign_commits,
+            git,
             remotes,
             paths,
         })
@@ -190,12 +211,35 @@ mod tests {
             sign_commits: Some(true),
             remotes: vec!["github.com/acme/*".into(), "gitlab.com/acme/*".into()],
             paths: vec!["~/work/acme/**".into()],
+            git: BTreeMap::from([
+                ("pull.rebase".to_string(), "true".to_string()),
+                (
+                    "url.git@github.com:acme/.insteadOf".to_string(),
+                    "https://github.com/acme/".to_string(),
+                ),
+            ]),
         };
         let form = Form::edit(0, &profile);
+        assert_eq!(
+            form.values[9],
+            "pull.rebase=true, url.git@github.com:acme/.insteadOf=https://github.com/acme/"
+        );
         assert_eq!(form.values[4], "ssh");
         assert_eq!(form.values[5], "yes");
         assert_eq!(form.values[7], "github.com/acme/*, gitlab.com/acme/*");
         assert_eq!(form.to_profile().unwrap(), profile);
+    }
+
+    #[test]
+    fn bad_extra_config_is_reported() {
+        let mut form = Form::new();
+        form.values[0] = "acme".into();
+        form.values[1] = "Ada".into();
+        form.values[2] = "ada@acme.example".into();
+        form.values[9] = "pull.rebase".into();
+        assert!(form.to_profile().unwrap_err().contains("key=value"));
+        form.values[9] = "rebase=true".into();
+        assert!(form.to_profile().unwrap_err().contains("section.name"));
     }
 
     #[test]

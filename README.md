@@ -223,7 +223,23 @@ signing_format = "ssh"
 sign_commits = true
 ```
 
-Everything after `email` is optional. `signing_format` is written to
+Everything after `email` is optional, and the `[profiles.git]` table can
+hold any other key the identity needs:
+
+```toml
+[[profiles]]
+name = "acme"
+user_name = "Ada Lovelace"
+email = "ada@acme.example"
+
+[profiles.git]
+"url.git@github.com:acme/.insteadOf" = "https://github.com/acme/"
+pull.rebase = "true"
+```
+
+Those keys are written with the profile and checked when matching, but
+applying another profile does not remove them, since gitenv cannot know
+which keys the other profile would want gone. `signing_format` is written to
 `gpg.format` (`openpgp`, `ssh` or `x509`) and `sign_commits` to
 `commit.gpgsign`; with SSH signing, `signing_key` is the path to the public
 key. Both count towards the match, so a repo that would make unsigned or

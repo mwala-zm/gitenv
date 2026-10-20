@@ -53,8 +53,11 @@ fn render_help(frame: &mut Frame) {
         ("q  Esc", "quit"),
         ("", ""),
         ("Applying writes user.name, user.email and, when set,", ""),
-        ("user.signingkey, gpg.format, commit.gpgsign and", ""),
-        ("core.sshCommand into .git/config.", ""),
+        (
+            "user.signingkey, gpg.format, commit.gpgsign, core.sshCommand",
+            "",
+        ),
+        ("and any extra keys into .git/config.", ""),
         ("", ""),
         ("● marks the profile git is using here; ◆ marks the one", ""),
         ("whose remote or path rules claim this repo.", ""),

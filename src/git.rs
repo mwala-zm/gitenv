@@ -4,6 +4,7 @@
 //! We shell out to `git` rather than link a library so behaviour matches
 //! exactly what the developer sees on the command line.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,28 @@ pub struct Identity {
     pub signing_format: Option<SigningFormat>,
     /// Value of `commit.gpgsign`, if git could parse it as a boolean.
     pub sign_commits: Option<bool>,
+    /// Every config value in scope, keyed as git prints them (section and
+    /// name lowercased, subsection as written). Lets a profile's extra
+    /// `git` keys be checked without knowing them in advance.
+    pub settings: BTreeMap<String, String>,
+}
+
+/// Write a config key the way `git config --list` prints it: section and
+/// variable name lowercased, any subsection in between left alone.
+pub fn normalize_key(key: &str) -> String {
+    let Some(first) = key.find('.') else {
+        return key.to_ascii_lowercase();
+    };
+    let last = key.rfind('.').unwrap_or(first);
+    if first == last {
+        return key.to_ascii_lowercase();
+    }
+    format!(
+        "{}{}{}",
+        key[..first].to_ascii_lowercase(),
+        &key[first..=last],
+        key[last + 1..].to_ascii_lowercase()
+    )
 }
 
 /// Parse a git boolean: `true`, `yes`, `on`, `1` and their opposites.
@@ -58,7 +81,11 @@ impl Identity {
             Some(want) => self.sign_commits.unwrap_or(false) == want,
             None => true,
         };
-        name_ok && email_ok && key_ok && ssh_ok && format_ok && sign_ok
+        let extra_ok = profile
+            .git
+            .iter()
+            .all(|(k, v)| self.settings.get(&normalize_key(k)) == Some(v));
+        name_ok && email_ok && key_ok && ssh_ok && format_ok && sign_ok && extra_ok
     }
 }
 
@@ -116,9 +143,10 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
         return Ok(None);
     }
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let effective = read_identity(&root, &[]);
     Ok(Some(Repo {
-        remote: config_get(&root, &["--get", "remote.origin.url"]),
-        effective: read_identity(&root, &[]),
+        remote: effective.settings.get("remote.origin.url").cloned(),
+        effective,
         local: read_identity(&root, &["--local"]),
         authors: recent_authors(&root, HISTORY_DEPTH),
         root,
@@ -187,6 +215,9 @@ pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
         )?,
         None => config_unset(&repo.root, "commit.gpgsign")?,
     }
+    for (key, value) in &profile.git {
+        config_set(&repo.root, key, value)?;
+    }
     Ok(())
 }
 
@@ -214,22 +245,50 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// One `git config --list` for the scope, turned into an identity plus the
+/// full map. A key set several times keeps its last value, which is what
+/// `git config --get` would return too.
 fn read_identity(root: &Path, scope: &[&str]) -> Identity {
-    let get = |key: &str| {
-        let mut args = scope.to_vec();
-        args.extend(["--get", key]);
-        config_get(root, &args)
-    };
+    let settings = config_list(root, scope);
+    let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned();
     Identity {
         name: get("user.name"),
         email: get("user.email"),
         signing_key: get("user.signingkey"),
-        ssh_command: get("core.sshCommand"),
+        ssh_command: get("core.sshcommand"),
         signing_format: get("gpg.format").and_then(|s| SigningFormat::parse(&s)),
         sign_commits: get("commit.gpgsign").and_then(|s| git_bool(&s)),
+        settings,
     }
 }
 
+fn config_list(root: &Path, scope: &[&str]) -> BTreeMap<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("config")
+        .args(scope)
+        .args(["--list", "-z"])
+        .output();
+    let mut map = BTreeMap::new();
+    let Ok(output) = output else {
+        return map;
+    };
+    if !output.status.success() {
+        return map;
+    }
+    // `-z` gives `key\nvalue\0` per entry; a key without `=` has no newline.
+    for entry in String::from_utf8_lossy(&output.stdout).split('\0') {
+        if entry.is_empty() {
+            continue;
+        }
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
+        map.insert(key.to_string(), value.to_string());
+    }
+    map
+}
+
+#[cfg(test)]
 fn config_get(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -357,6 +416,10 @@ mod tests {
         p.ssh_key = Some("/tmp/id_test".into());
         p.signing_format = Some(SigningFormat::Ssh);
         p.sign_commits = Some(true);
+        p.git.insert(
+            "url.git@github.com:acme/.insteadOf".into(),
+            "https://github.com/acme/".into(),
+        );
         apply(&repo, &p).unwrap();
 
         let repo = discover(&dir).unwrap().unwrap();
@@ -365,7 +428,17 @@ mod tests {
         assert_eq!(repo.local.signing_key.as_deref(), Some("KEY123"));
         assert_eq!(repo.local.signing_format, Some(SigningFormat::Ssh));
         assert_eq!(repo.local.sign_commits, Some(true));
+        assert_eq!(
+            repo.local
+                .settings
+                .get("url.git@github.com:acme/.insteadof")
+                .map(String::as_str),
+            Some("https://github.com/acme/")
+        );
         assert!(repo.effective.matches(&p));
+        p.git
+            .insert("url.git@github.com:acme/.insteadOf".into(), "other".into());
+        assert!(!repo.effective.matches(&p), "extra key with another value");
         assert_eq!(
             config_get(&dir, &["--local", "--get", "core.sshCommand"]).as_deref(),
             Some("ssh -i '/tmp/id_test' -o IdentitiesOnly=yes")
@@ -476,6 +549,16 @@ mod tests {
         p.signing_format = Some(SigningFormat::Openpgp);
         id.signing_format = None;
         assert!(id.matches(&p));
+    }
+
+    #[test]
+    fn keys_are_normalised_like_git_prints_them() {
+        assert_eq!(normalize_key("User.Name"), "user.name");
+        assert_eq!(
+            normalize_key("URL.git@GitHub.com:Acme/.insteadOf"),
+            "url.git@GitHub.com:Acme/.insteadof"
+        );
+        assert_eq!(normalize_key("core"), "core");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -60,6 +61,11 @@ pub struct Profile {
     /// Optional value for `commit.gpgsign`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_commits: Option<bool>,
+    /// Any other git config to set with this profile, as a `[profiles.git]`
+    /// table of `key = "value"`. Keys are checked when matching but never
+    /// removed by applying another profile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub git: BTreeMap<String, String>,
     /// Remote URL globs this profile claims, e.g. `github.com/acme/*`.
     /// See `rules::normalize_remote` for the shape they are matched against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -141,6 +147,10 @@ mod tests {
                     ssh_key: Some("/home/ada/.ssh/id_acme".into()),
                     signing_format: Some(SigningFormat::Ssh),
                     sign_commits: Some(true),
+                    git: BTreeMap::from([(
+                        "url.git@github.com:acme/.insteadOf".to_string(),
+                        "https://github.com/acme/".to_string(),
+                    )]),
                     remotes: vec!["github.com/acme/*".into()],
                     paths: vec!["~/work/acme/**".into()],
                 },
@@ -149,6 +159,7 @@ mod tests {
         let text = toml::to_string_pretty(&config).unwrap();
         assert!(text.contains("signing_format = \"ssh\""), "{text}");
         assert!(text.contains("sign_commits = true"), "{text}");
+        assert!(text.contains("[profiles.git]"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(config, back);
     }
