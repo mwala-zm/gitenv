@@ -18,7 +18,7 @@ pub const LABELS: [&str; 10] = [
     "SSH key path (optional)",
     "Remote rules (comma-separated)",
     "Path rules (comma-separated)",
-    "Extra git config (k=v, comma-sep.)",
+    "Extra config (k=v, comma-sep.)",
 ];
 
 /// Width of the widest label plus a gap, for the UI to line values up.

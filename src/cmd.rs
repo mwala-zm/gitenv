@@ -138,12 +138,18 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
         "this repo's .git/config"
     };
     out.push(format!("source       {source}"));
-    let foreign = repo.foreign_authors();
+    let expected = rules::expected(config, repo);
+    let reference = match &expected {
+        Some((p, _)) => Some(p.email.as_str()),
+        None => repo.effective.email.as_deref(),
+    };
+    let foreign = repo.foreign_authors(reference);
     if repo.commits_inspected() > 0 {
         let line = if foreign.is_empty() {
             format!(
-                "history      last {} commits all by the current email",
-                repo.commits_inspected()
+                "history      last {} commits all by {}",
+                repo.commits_inspected(),
+                reference.unwrap_or("(not set)")
             )
         } else {
             let who: Vec<String> = foreign
@@ -167,7 +173,7 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
             .map(|p| p.name.as_str())
             .unwrap_or("(none)")
     ));
-    match rules::expected(config, repo) {
+    match expected {
         Some((p, why)) => out.push(format!(
             "rule         '{}' claims this repo ({why})",
             p.name
@@ -257,9 +263,10 @@ mod tests {
             },
         ];
         let text = long_status(&config, &repo, &check::verdict(&config, &repo));
+        // The rule says 'acme', so the 7 personal commits are the odd ones.
         assert!(
             text.contains(
-                "history      3 of the last 10 commits by another email: ada@acme.example (3)"
+                "history      7 of the last 10 commits by another email: ada@example.com (7)"
             ),
             "{text}"
         );

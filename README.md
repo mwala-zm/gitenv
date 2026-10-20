@@ -158,7 +158,8 @@ gitenv completions fish > ~/.config/fish/completions/gitenv.fish
 Switching identity only protects the next commit. The repository pane and
 `gitenv status` also look at the authors of the last 20 commits on the
 current branch and warn when some were made with a different email than
-the one git would use now, with a count per author. Use `git rebase` with
+the repo should be using (the profile a rule claims it for, else the one
+git would use now), with a count per author. Use `git rebase` with
 `--reset-author` or `git filter-repo` to repair those before pushing.
 
 ## Hooks

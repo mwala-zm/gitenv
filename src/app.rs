@@ -85,6 +85,15 @@ impl App {
         rules::expected(&self.config, repo)
     }
 
+    /// The email recent commits ought to carry: the expected profile's when
+    /// a rule claims this repo, otherwise whatever git would use now.
+    pub fn reference_email(&self) -> Option<&str> {
+        match self.expected_profile() {
+            Some((p, _)) => Some(p.email.as_str()),
+            None => self.repo.as_ref()?.effective.email.as_deref(),
+        }
+    }
+
     pub fn selected_profile(&self) -> Option<&Profile> {
         self.config.profiles.get(self.selected)
     }

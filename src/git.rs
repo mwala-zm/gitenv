@@ -120,12 +120,14 @@ impl Repo {
         self.authors.iter().map(|a| a.commits).sum()
     }
 
-    /// Recent authors whose email is not the one git would use now. These
-    /// are the commits that were probably made on the wrong identity.
-    pub fn foreign_authors(&self) -> Vec<&Author> {
+    /// Recent authors whose email is not `reference`: the commits that were
+    /// probably made on the wrong identity. Callers pass the email the repo
+    /// should be using, which is the expected profile's when a rule claims
+    /// the repo and otherwise the one git would use now.
+    pub fn foreign_authors(&self, reference: Option<&str>) -> Vec<&Author> {
         self.authors
             .iter()
-            .filter(|a| Some(a.email.as_str()) != self.effective.email.as_deref())
+            .filter(|a| Some(a.email.as_str()) != reference)
             .collect()
     }
 }
@@ -518,9 +520,10 @@ mod tests {
         assert_eq!(repo.commits_inspected(), 3);
         assert_eq!(repo.authors[0].email, "ada@example.com");
         assert_eq!(repo.authors[0].commits, 2);
-        let foreign = repo.foreign_authors();
+        let foreign = repo.foreign_authors(repo.effective.email.as_deref());
         assert_eq!(foreign.len(), 1);
         assert_eq!(foreign[0].email, "ada@example.com");
+        assert_eq!(repo.foreign_authors(None).len(), 2);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

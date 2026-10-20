@@ -72,7 +72,7 @@ fn render_help(frame: &mut Frame) {
         })
         .collect();
 
-    let area = centered(frame.area(), 62, lines.len() as u16 + 2);
+    let area = centered(frame.area(), 68, lines.len() as u16 + 2);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Help (any key to close) ")),
@@ -302,14 +302,13 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         field("name", &repo.effective.name),
         field("email", &repo.effective.email),
         field("signing key", &repo.effective.signing_key),
-        field("signing", &signing_summary(repo)),
         field("ssh", &repo.effective.ssh_command),
-        Line::from(""),
-        verdict,
-        rule_note,
-        local_note,
     ];
-    lines.extend(history_lines(repo));
+    if let Some(summary) = signing_summary(repo) {
+        lines.push(field("signing", &Some(summary)));
+    }
+    lines.extend([Line::from(""), verdict, rule_note, local_note]);
+    lines.extend(history_lines(repo, app.reference_email()));
 
     let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -336,24 +335,26 @@ fn signing_summary(repo: &Repo) -> Option<String> {
     Some(format!("{format}, {sign}"))
 }
 
-/// The author audit: were recent commits made with a different identity?
-fn history_lines(repo: &Repo) -> Vec<Line<'static>> {
+/// The author audit: were recent commits made with a different identity
+/// than `reference`, the email this repo ought to be using?
+fn history_lines(repo: &Repo, reference: Option<&str>) -> Vec<Line<'static>> {
     let inspected = repo.commits_inspected();
     if inspected == 0 {
         return Vec::new();
     }
-    let foreign = repo.foreign_authors();
+    let foreign = repo.foreign_authors(reference);
+    let reference = reference.unwrap_or("(not set)");
     let mut lines = vec![Line::from(""), Line::from("Recent commits".bold())];
     if foreign.is_empty() {
         lines.push(Line::from(
-            format!("last {inspected} all authored with the current email").dim(),
+            format!("last {inspected} all authored as {reference}").dim(),
         ));
         return lines;
     }
     let count: usize = foreign.iter().map(|a| a.commits).sum();
     lines.push(Line::from(vec![
         "⚠ ".yellow(),
-        format!("{count} of the last {inspected} were authored with another email:").yellow(),
+        format!("{count} of the last {inspected} were not authored as {reference}:").yellow(),
     ]));
     for author in foreign.iter().take(3) {
         lines.push(Line::from(
@@ -393,4 +394,132 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         ]),
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    //! Snapshot tests: render each screen into a fake terminal and compare
+    //! with the files in `src/snapshots/`. After an intended visual change,
+    //! run `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
+
+    use super::*;
+    use crate::git::{Author, Identity, Repo};
+    use crate::profile::{Config, Profile};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn profiles() -> Vec<Profile> {
+        vec![
+            Profile {
+                name: "personal".into(),
+                user_name: "Ada Lovelace".into(),
+                email: "ada@example.com".into(),
+                ..Default::default()
+            },
+            Profile {
+                name: "acme".into(),
+                user_name: "Ada Lovelace".into(),
+                email: "ada@acme.example".into(),
+                signing_key: Some("ABCD1234".into()),
+                remotes: vec!["github.com/acme/*".into()],
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn repo() -> Repo {
+        Repo {
+            root: "/home/ada/work/acme/api".into(),
+            remote: Some("git@github.com:acme/api.git".into()),
+            effective: Identity {
+                name: Some("Ada Lovelace".into()),
+                email: Some("ada@example.com".into()),
+                ..Default::default()
+            },
+            local: Identity::default(),
+            authors: vec![
+                Author {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@example.com".into(),
+                    commits: 17,
+                },
+                Author {
+                    name: "Ada Lovelace".into(),
+                    email: "ada@acme.example".into(),
+                    commits: 3,
+                },
+            ],
+        }
+    }
+
+    fn app(profiles: Vec<Profile>, repo: Option<Repo>) -> App {
+        App {
+            config: Config { profiles },
+            config_path: "/home/ada/.config/gitenv/config.toml".into(),
+            repo,
+            selected: 1,
+            status: None,
+            mode: Mode::Normal,
+            should_quit: false,
+        }
+    }
+
+    fn draw(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(96, 26)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn wrong_profile_with_foreign_authors() {
+        insta::assert_snapshot!(draw(&app(profiles(), Some(repo()))));
+    }
+
+    #[test]
+    fn on_the_right_profile() {
+        let mut repo = repo();
+        repo.effective.email = Some("ada@acme.example".into());
+        repo.effective.signing_key = Some("ABCD1234".into());
+        repo.local = repo.effective.clone();
+        repo.authors.truncate(1);
+        repo.authors[0].email = "ada@acme.example".into();
+        let mut app = app(profiles(), Some(repo));
+        app.status = Some("Applied profile 'acme' to this repo".into());
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn no_profiles_and_no_repo() {
+        let mut app = app(Vec::new(), None);
+        app.selected = 0;
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn help_popup() {
+        let mut app = app(profiles(), Some(repo()));
+        app.mode = Mode::Help;
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn form_with_cursor_mid_field() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut form = Form::edit(1, &profiles()[1]);
+        form.next_field();
+        form.next_field();
+        form.left();
+        form.left();
+        form.left();
+        form.error = Some("Git user.email must look like an email address".into());
+        app.mode = Mode::Edit(Box::new(form));
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn confirm_delete_popup() {
+        let mut app = app(profiles(), Some(repo()));
+        app.mode = Mode::ConfirmDelete;
+        insta::assert_snapshot!(draw(&app));
+    }
 }
