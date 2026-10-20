@@ -1,6 +1,3 @@
-//! The profile editor form. Plain data plus a few methods; the UI draws it
-//! and `App` decides what to do when it is submitted.
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -21,17 +18,13 @@ pub const LABELS: [&str; 10] = [
     "Extra config (k=v, comma-sep.)",
 ];
 
-/// Width of the widest label plus a gap, for the UI to line values up.
 pub const LABEL_WIDTH: usize = 32;
 
 #[derive(Debug, Clone, Default)]
 pub struct Form {
     pub values: [String; 10],
-    /// Which field has the cursor.
     pub field: usize,
-    /// Cursor position within the current field, in characters.
     pub cursor: usize,
-    /// `Some(index)` when editing an existing profile, `None` for a new one.
     pub editing: Option<usize>,
     pub error: Option<String>,
 }
@@ -81,7 +74,6 @@ impl Form {
         self.values[self.field].chars().count()
     }
 
-    /// Byte offset of the cursor in the current field.
     fn byte_at(&self, chars: usize) -> usize {
         self.values[self.field]
             .char_indices()
@@ -120,7 +112,6 @@ impl Form {
         }
     }
 
-    /// Delete the character before the cursor.
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
@@ -129,7 +120,6 @@ impl Form {
         self.delete();
     }
 
-    /// Delete the character under the cursor.
     pub fn delete(&mut self) {
         if self.cursor >= self.len() {
             return;
@@ -154,21 +144,17 @@ impl Form {
         self.cursor = self.len();
     }
 
-    /// Delete from the start of the field to the cursor (Ctrl+U).
     pub fn kill_to_start(&mut self) {
         let at = self.byte_at(self.cursor);
         self.values[self.field].drain(..at);
         self.cursor = 0;
     }
 
-    /// Delete from the cursor to the end of the field (Ctrl+K).
     pub fn kill_to_end(&mut self) {
         let at = self.byte_at(self.cursor);
         self.values[self.field].truncate(at);
     }
 
-    /// Delete the word before the cursor (Ctrl+W), where a word ends at
-    /// whitespace or a path separator.
     pub fn kill_word(&mut self) {
         let chars: Vec<char> = self.values[self.field].chars().collect();
         let mut start = self.cursor;
@@ -183,8 +169,7 @@ impl Form {
         self.cursor = start;
     }
 
-    /// Validate and turn the form into a profile. Uniqueness of the name
-    /// is checked by `App`, which knows the other profiles.
+    /// Uniqueness of the name is checked by `App`, which knows the other profiles.
     pub fn to_profile(&self) -> Result<Profile, String> {
         let [
             name,

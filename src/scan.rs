@@ -1,6 +1,3 @@
-//! `gitenv scan [DIR]`: every repository under a directory, and whether
-//! each is on the right profile. The audit for people with forty clones.
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -15,18 +12,14 @@ use crate::profile::Config;
 use crate::rules;
 
 pub struct Options {
-    /// Only list repositories that are not on the right profile.
     pub problems_only: bool,
-    /// Apply the expected profile wherever a rule claims the repo and the
-    /// identity is wrong.
     pub fix: bool,
 }
 
-/// Directories that are never worth descending into.
 const SKIP: &[&str] = &["node_modules", "target", ".git"];
 
-/// Find every git repository under `root`. Does not descend into a
-/// repository once found, into hidden directories, or through symlinks.
+/// Does not descend into a repository once found, into hidden directories,
+/// or through symlinks.
 pub fn find_repos(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk(root, &mut found);
@@ -58,12 +51,10 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// One line of the report.
 #[derive(Debug)]
 pub struct Row {
     pub repo: Repo,
     pub verdict: Verdict,
-    /// Set when `--fix` applied a profile here.
     pub fixed: Option<String>,
 }
 
@@ -89,8 +80,7 @@ impl Row {
     }
 }
 
-/// Inspect every repository under `root`. Repos are visited on a few
-/// threads because each one costs several `git` processes.
+/// Repos are visited on a few threads because each costs several `git` processes.
 pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<Vec<Row>> {
     let paths = find_repos(root);
     let next = AtomicUsize::new(0);
@@ -138,8 +128,6 @@ fn inspect(config: &Config, path: &Path, opts: &Options) -> Option<Row> {
     })
 }
 
-/// Lay the rows out as a table. Paths under the home directory are shown
-/// with a leading `~`.
 pub fn render(rows: &[Row], opts: &Options) -> String {
     let shown: Vec<&Row> = rows
         .iter()
@@ -192,7 +180,6 @@ fn tildify(path: &Path) -> String {
     path.display().to_string()
 }
 
-/// Entry point for `gitenv scan`.
 pub fn run(root: &Path, opts: &Options) -> ExitCode {
     let config = match Config::path().and_then(|p| Config::load(&p)) {
         Ok(config) => config,
@@ -311,7 +298,6 @@ mod tests {
         assert!(text.contains("(1 just fixed)"), "{text}");
         assert!(rows.iter().all(Row::is_ok));
 
-        // Second pass: everything is right now.
         let rows = scan(&config, &base, &opts).unwrap();
         assert!(rows.iter().all(|r| r.verdict.is_ok()));
 

@@ -6,10 +6,8 @@ use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-/// Environment variable that overrides the config file location.
 pub const CONFIG_ENV: &str = "GITENV_CONFIG";
 
-/// Value for `gpg.format`: how commits are signed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SigningFormat {
@@ -19,7 +17,6 @@ pub enum SigningFormat {
 }
 
 impl SigningFormat {
-    /// The string git uses for `gpg.format`.
     pub fn as_git(self) -> &'static str {
         match self {
             SigningFormat::Openpgp => "openpgp",
@@ -28,7 +25,6 @@ impl SigningFormat {
         }
     }
 
-    /// Parse what a user might type: git's names plus `gpg` for openpgp.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "openpgp" | "gpg" | "pgp" => Some(SigningFormat::Openpgp),
@@ -39,43 +35,29 @@ impl SigningFormat {
     }
 }
 
-/// One git identity. Serialised as a `[[profiles]]` table in the config file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
-    /// Short label shown in the UI, e.g. `personal` or `acme-corp`.
     pub name: String,
-    /// Value written to `user.name`.
     pub user_name: String,
-    /// Value written to `user.email`.
     pub email: String,
-    /// Optional value for `user.signingkey`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key: Option<String>,
-    /// Optional private key path, written as `core.sshCommand = ssh -i <path>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<PathBuf>,
-    /// Optional value for `gpg.format`. With `ssh`, `signing_key` is the
-    /// path to a public key (or `key::ssh-ed25519 AAAA...`).
+    /// With `ssh`, `signing_key` is the path to a public key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_format: Option<SigningFormat>,
-    /// Optional value for `commit.gpgsign`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_commits: Option<bool>,
-    /// Any other git config to set with this profile, as a `[profiles.git]`
-    /// table of `key = "value"`. Keys are checked when matching but never
-    /// removed by applying another profile.
+    /// Checked when matching, but never removed by applying another profile.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub git: BTreeMap<String, String>,
-    /// Remote URL globs this profile claims, e.g. `github.com/acme/*`.
-    /// See `rules::normalize_remote` for the shape they are matched against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<String>,
-    /// Repository path globs this profile claims, e.g. `~/work/acme/**`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 }
 
-/// The whole config file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
@@ -83,10 +65,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Where the config lives. `GITENV_CONFIG` wins when set, so dotfile
-    /// managers and tests can point at any file. Otherwise on macOS this is
-    /// `~/Library/Application Support/gitenv/config.toml`, on Linux
-    /// `~/.config/gitenv/config.toml`.
+    /// `~/Library/Application Support/gitenv/config.toml` on macOS,
+    /// `~/.config/gitenv/config.toml` on Linux, unless `GITENV_CONFIG` is set.
     pub fn path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
             return Ok(PathBuf::from(path));
@@ -96,8 +76,7 @@ impl Config {
         Ok(dirs.config_dir().join("config.toml"))
     }
 
-    /// Load the config file. A missing file is not an error: you get an
-    /// empty config and the UI tells you where to create one.
+    /// A missing file is not an error: the UI tells you where to create one.
     pub fn load(path: &PathBuf) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -118,8 +97,6 @@ impl Config {
         Ok(())
     }
 
-    /// Find the profile whose name and email match the given identity.
-    /// If the profile declares a signing key, that must match too.
     pub fn matching(&self, identity: &crate::git::Identity) -> Option<&Profile> {
         self.profiles.iter().find(|p| identity.matches(p))
     }

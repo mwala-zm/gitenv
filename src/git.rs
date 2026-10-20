@@ -1,7 +1,4 @@
-//! Talks to the `git` binary.
-//!
-//! Rails analogy: the database adapter. Nothing in here knows about the UI.
-//! We shell out to `git` rather than link a library so behaviour matches
+//! Shells out to `git` rather than linking a library, so behaviour matches
 //! exactly what the developer sees on the command line.
 
 use std::collections::BTreeMap;
@@ -12,21 +9,16 @@ use anyhow::{Context, Result, bail};
 
 use crate::profile::{Profile, SigningFormat};
 
-/// The identity git would use for a commit right now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Identity {
     pub name: Option<String>,
     pub email: Option<String>,
     pub signing_key: Option<String>,
-    /// Value of `core.sshCommand`, which decides which ssh key is offered.
     pub ssh_command: Option<String>,
-    /// Value of `gpg.format`.
     pub signing_format: Option<SigningFormat>,
-    /// Value of `commit.gpgsign`, if git could parse it as a boolean.
     pub sign_commits: Option<bool>,
-    /// Every config value in scope, keyed as git prints them (section and
-    /// name lowercased, subsection as written). Lets a profile's extra
-    /// `git` keys be checked without knowing them in advance.
+    /// Every config value in scope, keyed as `git config --list` prints them,
+    /// so a profile's extra `git` keys can be checked without knowing them.
     pub settings: BTreeMap<String, String>,
 }
 
@@ -48,7 +40,6 @@ pub fn normalize_key(key: &str) -> String {
     )
 }
 
-/// Parse a git boolean: `true`, `yes`, `on`, `1` and their opposites.
 pub fn git_bool(s: &str) -> Option<bool> {
     match s.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "on" | "1" => Some(true),
@@ -58,8 +49,6 @@ pub fn git_bool(s: &str) -> Option<bool> {
 }
 
 impl Identity {
-    /// True when this identity is what `profile` would produce. Optional
-    /// parts of the profile only have to match when the profile sets them.
     pub fn matches(&self, profile: &Profile) -> bool {
         let name_ok = self.name.as_deref() == Some(profile.user_name.as_str());
         let email_ok = self.email.as_deref() == Some(profile.email.as_str());
@@ -89,10 +78,8 @@ impl Identity {
     }
 }
 
-/// How many recent commits the author audit looks at.
 pub const HISTORY_DEPTH: usize = 20;
 
-/// One author seen in recent history and how many of those commits are theirs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Author {
     pub name: String,
@@ -100,30 +87,22 @@ pub struct Author {
     pub commits: usize,
 }
 
-/// A git repository the tool is looking at.
 #[derive(Debug, Clone)]
 pub struct Repo {
     pub root: PathBuf,
     pub remote: Option<String>,
-    /// What git will actually use: local config layered over global.
     pub effective: Identity,
-    /// Only what is set in `.git/config`, ignoring global config.
     pub local: Identity,
-    /// Authors of the last [`HISTORY_DEPTH`] commits on the current branch,
-    /// most frequent first. Empty for a repo with no commits yet.
     pub authors: Vec<Author>,
 }
 
 impl Repo {
-    /// Commits actually inspected: at most [`HISTORY_DEPTH`].
     pub fn commits_inspected(&self) -> usize {
         self.authors.iter().map(|a| a.commits).sum()
     }
 
-    /// Recent authors whose email is not `reference`: the commits that were
-    /// probably made on the wrong identity. Callers pass the email the repo
-    /// should be using, which is the expected profile's when a rule claims
-    /// the repo and otherwise the one git would use now.
+    /// `reference` is the email the repo should be using: the expected
+    /// profile's when a rule claims the repo, else the effective one.
     pub fn foreign_authors(&self, reference: Option<&str>) -> Vec<&Author> {
         self.authors
             .iter()
@@ -132,8 +111,6 @@ impl Repo {
     }
 }
 
-/// Find the repository containing `dir`. Returns `None` when `dir` is not
-/// inside a git working tree.
 pub fn discover(dir: &Path) -> Result<Option<Repo>> {
     let output = Command::new("git")
         .arg("-C")
@@ -155,8 +132,6 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
     }))
 }
 
-/// Authors of the last `depth` commits on HEAD, most frequent first. A repo
-/// without commits, or any git failure, gives an empty list.
 pub fn recent_authors(root: &Path, depth: usize) -> Vec<Author> {
     let output = Command::new("git")
         .arg("-C")
@@ -187,13 +162,11 @@ pub fn recent_authors(root: &Path, depth: usize) -> Vec<Author> {
     authors
 }
 
-/// The identity from `~/.gitconfig` alone. Used to seed a first profile.
 pub fn global_identity() -> Identity {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     read_identity(&cwd, &["--global"])
 }
 
-/// Write `profile` into the repo's local config so it wins over global.
 pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
     config_set(&repo.root, "user.name", &profile.user_name)?;
     config_set(&repo.root, "user.email", &profile.email)?;
@@ -231,7 +204,6 @@ pub fn ssh_command(key: &Path) -> String {
     format!("ssh -i {} -o IdentitiesOnly=yes", shell_quote(&path))
 }
 
-/// `~` and `~/x` become the home directory and a path under it.
 pub fn expand_tilde(path: &Path) -> PathBuf {
     let Ok(rest) = path.strip_prefix("~") else {
         return path.to_path_buf();
@@ -247,9 +219,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// One `git config --list` for the scope, turned into an identity plus the
-/// full map. A key set several times keeps its last value, which is what
-/// `git config --get` would return too.
+/// A key set several times keeps its last value, as `git config --get` would.
 fn read_identity(root: &Path, scope: &[&str]) -> Identity {
     let settings = config_list(root, scope);
     let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned();
@@ -446,7 +416,6 @@ mod tests {
             Some("ssh -i '/tmp/id_test' -o IdentitiesOnly=yes")
         );
 
-        // Applying a profile without a key or ssh path clears both.
         apply(&repo, &profile(None)).unwrap();
         let repo = discover(&dir).unwrap().unwrap();
         assert!(repo.local.signing_key.is_none());

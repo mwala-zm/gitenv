@@ -32,7 +32,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
-/// A rectangle of the given size centred in `area`, clamped to fit.
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -123,8 +122,6 @@ fn render_form(frame: &mut Frame, form: &Form) {
             } else {
                 Style::new()
             };
-            // The active field scrolls to keep the cursor in view; the
-            // others show their start.
             let offset = if i == form.field {
                 scroll_offset(form.cursor, value_width)
             } else {
@@ -148,7 +145,6 @@ fn render_form(frame: &mut Frame, form: &Form) {
         area,
     );
 
-    // Put the terminal cursor where the form's cursor is.
     let offset = scroll_offset(form.cursor, value_width);
     let x = area.x + 1 + label_width as u16 + (form.cursor - offset) as u16;
     let y = area.y + 1 + form.field as u16;
@@ -166,7 +162,6 @@ fn scroll_offset(cursor: usize, width: usize) -> usize {
     cursor.saturating_sub(width - 1)
 }
 
-/// `width` characters of `s` starting `offset` characters in.
 fn window(s: &str, offset: usize, width: usize) -> String {
     s.chars().skip(offset).take(width).collect()
 }
@@ -179,9 +174,6 @@ fn render_header(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(title), area);
 }
 
-/// Dim wordmark drawn in the empty part of the profiles pane, figlet
-/// standard font. Purely decorative: it is skipped when the pane is too
-/// small or the list would run into it.
 const WORDMARK: [&str; 6] = [
     r"       _ _",
     r"  __ _(_) |_  ___ _ __ __   __",
@@ -191,8 +183,6 @@ const WORDMARK: [&str; 6] = [
     r" |___/",
 ];
 
-/// Draw the wordmark at the bottom of `inner` if it fits below the first
-/// `used_rows` rows with a blank row to spare.
 fn render_wordmark(frame: &mut Frame, inner: Rect, used_rows: u16) {
     let height = WORDMARK.len() as u16;
     let width = WORDMARK.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
@@ -354,8 +344,6 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(text, area);
 }
 
-/// `gpg.format` and `commit.gpgsign` in one phrase, or `None` when neither
-/// is set anywhere.
 fn signing_summary(repo: &Repo) -> Option<String> {
     let id = &repo.effective;
     if id.signing_format.is_none() && id.sign_commits.is_none() {
@@ -373,8 +361,6 @@ fn signing_summary(repo: &Repo) -> Option<String> {
     Some(format!("{format}, {sign}"))
 }
 
-/// The author audit: were recent commits made with a different identity
-/// than `reference`, the email this repo ought to be using?
 fn history_lines(repo: &Repo, reference: Option<&str>) -> Vec<Line<'static>> {
     let inspected = repo.commits_inspected();
     if inspected == 0 {

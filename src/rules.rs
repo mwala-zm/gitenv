@@ -2,9 +2,6 @@
 //!
 //! A profile can claim repositories by remote URL or by path. Each rule is
 //! a glob; the first profile with a matching rule is the expected one.
-//! Rails analogy: route constraints. The identity check says whether the
-//! request got to a controller at all; these say whether it was the right
-//! controller.
 
 use std::path::Path;
 
@@ -68,9 +65,6 @@ fn options() -> MatchOptions {
     }
 }
 
-/// Does `pattern` claim the remote `url`? Both go through
-/// [`normalize_remote`] first, so `github.com/acme/*` matches
-/// `git@github.com:acme/api.git`.
 pub fn remote_matches(pattern: &str, url: &str) -> bool {
     match Pattern::new(&normalize_remote(pattern)) {
         Ok(p) => p.matches_with(&normalize_remote(url), options()),
@@ -78,8 +72,7 @@ pub fn remote_matches(pattern: &str, url: &str) -> bool {
     }
 }
 
-/// Does `pattern` claim the repository at `root`? A leading `~` in the
-/// pattern is the home directory, and `dir/**` also matches `dir` itself.
+/// A leading `~` is the home directory, and `dir/**` also matches `dir` itself.
 pub fn path_matches(pattern: &str, root: &Path) -> bool {
     let expanded = crate::git::expand_tilde(Path::new(pattern))
         .display()
@@ -97,7 +90,6 @@ pub fn path_matches(pattern: &str, root: &Path) -> bool {
     }
 }
 
-/// Explain why a profile claims a repo: which rule fired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     Remote(String),
@@ -113,7 +105,6 @@ impl std::fmt::Display for Reason {
     }
 }
 
-/// The first rule on `profile` that claims `repo`, if any.
 pub fn claim(profile: &Profile, repo: &Repo) -> Option<Reason> {
     if let Some(url) = &repo.remote
         && let Some(p) = profile.remotes.iter().find(|p| remote_matches(p, url))
@@ -127,8 +118,6 @@ pub fn claim(profile: &Profile, repo: &Repo) -> Option<Reason> {
         .map(|p| Reason::Path(p.clone()))
 }
 
-/// The profile this repository should be on, and the rule that says so.
-/// Profiles are tried in config order; the first claim wins.
 pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Reason)> {
     config
         .profiles
@@ -136,8 +125,6 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
         .find_map(|p| claim(p, repo).map(|why| (p, why)))
 }
 
-/// Check that every rule is a well-formed glob. Used by the form so a typo
-/// is reported when saving rather than silently never matching.
 pub fn validate(patterns: &[String]) -> Result<(), String> {
     for p in patterns {
         Pattern::new(p).map_err(|e| format!("Bad pattern '{p}': {}", e.msg))?;

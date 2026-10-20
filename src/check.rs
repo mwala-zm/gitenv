@@ -2,9 +2,6 @@
 //! profiles? Prints nothing and exits 0 when it is, so a pre-commit or
 //! pre-push hook stays quiet on the happy path. Exits 1 on a mismatch and
 //! 2 when it could not even look (not a repo, unreadable config, no git).
-//!
-//! Rails analogy: a rake task. It reuses the models and never touches the
-//! views in `ui.rs`.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -18,16 +15,12 @@ use crate::rules::{self, Reason};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// The effective identity matches the profile with this name.
     Match(String),
-    /// Nothing matches. Carries what git would use so the message can show it.
     Mismatch {
         root: PathBuf,
         identity: Identity,
         no_profiles: bool,
     },
-    /// A rule says this repo belongs to `expected`, but the identity is
-    /// something else: another profile (`actual`) or nothing saved at all.
     WrongProfile {
         root: PathBuf,
         expected: String,
@@ -43,7 +36,6 @@ impl Verdict {
     }
 }
 
-/// Decide whether `repo` is on a saved profile.
 pub fn verdict(config: &Config, repo: &Repo) -> Verdict {
     let actual = config.matching(&repo.effective);
     if let Some((expected, reason)) = rules::expected(config, repo)
@@ -129,7 +121,6 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// Entry point for `gitenv check [PATH]`.
 pub fn run(dir: &Path) -> ExitCode {
     match try_run(dir) {
         Ok(verdict) if verdict.is_ok() => ExitCode::SUCCESS,

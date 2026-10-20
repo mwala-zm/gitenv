@@ -1,8 +1,4 @@
 //! Non-interactive subcommands: `apply` and `status`.
-//!
-//! Rails analogy: more rake tasks beside `check`. They reuse the models in
-//! `git`, `profile` and `rules` and print plain text, so they work from
-//! scripts, clone hooks and shell prompts.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -14,7 +10,6 @@ use crate::git::{self, Repo};
 use crate::profile::Config;
 use crate::rules;
 
-/// Load the profiles file and find the repository containing `dir`.
 pub fn load(dir: &Path) -> Result<(Config, Repo)> {
     let config = Config::load(&Config::path()?)?;
     let repo = git::discover(dir)?
@@ -22,8 +17,6 @@ pub fn load(dir: &Path) -> Result<(Config, Repo)> {
     Ok((config, repo))
 }
 
-/// `gitenv apply [PROFILE] [PATH]`: write a profile into the repo's local
-/// config. Without a name, the profile whose rules claim the repo is used.
 pub fn apply(name: Option<&str>, dir: &Path) -> ExitCode {
     match try_apply(name, dir) {
         Ok(msg) => {
@@ -68,9 +61,6 @@ fn try_apply(name: Option<&str>, dir: &Path) -> Result<String> {
     ))
 }
 
-/// `gitenv status [--short] [PATH]`: what git would use here and whether
-/// it is right. Always prints; exit codes are the same as `check` so a
-/// prompt can colour the output.
 pub fn status(short: bool, dir: &Path) -> ExitCode {
     let (config, repo) = match load(dir) {
         Ok(loaded) => loaded,
@@ -95,8 +85,6 @@ pub fn status(short: bool, dir: &Path) -> ExitCode {
     }
 }
 
-/// One token for a prompt: the profile in use, with `-> name` when a rule
-/// says it should be another, and `?` when nothing matches.
 pub fn short_status(verdict: &Verdict) -> String {
     match verdict {
         Verdict::Match(name) => name.clone(),

@@ -1,9 +1,3 @@
-//! Application state and key handling.
-//!
-//! Rails analogy: the controller. `App` is the single source of truth for
-//! the screen, and `handle_key` turns a key press into a state change.
-//! Nothing in here draws anything.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -14,13 +8,11 @@ use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
 use crate::rules::{self, Reason};
 
-/// What the screen is doing. Popups sit on top of the normal view.
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
     Help,
     Edit(Box<Form>),
-    /// Asking whether to delete the highlighted profile.
     ConfirmDelete,
 }
 
@@ -28,16 +20,13 @@ pub struct App {
     pub config: Config,
     pub config_path: PathBuf,
     pub repo: Option<Repo>,
-    /// Index into `config.profiles` of the highlighted row.
     pub selected: usize,
-    /// One-line message shown in the footer after an action.
     pub status: Option<String>,
     pub mode: Mode,
     pub should_quit: bool,
 }
 
 impl App {
-    /// Build the app looking at the repository that contains `dir`.
     pub fn new(dir: &Path) -> Result<Self> {
         let config_path = Config::path()?;
         let mut config = Config::load(&config_path)?;
@@ -73,13 +62,11 @@ impl App {
         Ok(app)
     }
 
-    /// The profile that matches what git would use right now, if any.
     pub fn active_profile(&self) -> Option<&Profile> {
         let repo = self.repo.as_ref()?;
         self.config.matching(&repo.effective)
     }
 
-    /// The profile whose rules claim this repo, and the rule that fired.
     pub fn expected_profile(&self) -> Option<(&Profile, Reason)> {
         let repo = self.repo.as_ref()?;
         rules::expected(&self.config, repo)
@@ -191,7 +178,6 @@ impl App {
         }
     }
 
-    /// Insert or replace a profile, then persist the config file.
     fn save_profile(&mut self, target: Option<usize>, profile: Profile) -> Result<(), String> {
         let clash = self
             .config
@@ -219,8 +205,7 @@ impl App {
         Ok(())
     }
 
-    /// Remove the highlighted profile and persist the config file. Repos
-    /// the profile was applied to keep their `.git/config` as it is.
+    /// Repos the profile was applied to keep their `.git/config` as it is.
     fn delete_selected(&mut self) {
         if self.selected >= self.config.profiles.len() {
             return;
@@ -270,9 +255,8 @@ impl App {
         }
     }
 
-    /// Move the highlight onto the profile the repo should be on: the one
-    /// a rule claims it for, else the one that is currently active. With a
-    /// rule violation that puts Enter on the fix.
+    /// Prefer the rule-claimed profile over the active one, so that on a
+    /// violation Enter is the fix.
     fn select_active(&mut self) {
         let target = self
             .expected_profile()
@@ -370,7 +354,6 @@ mod tests {
         assert!(app.config.profiles.is_empty());
         assert_eq!(app.selected, 0);
 
-        // Nothing left: a further delete is a no-op rather than a panic.
         app.delete_selected();
         std::fs::remove_file(&app.config_path).ok();
     }
