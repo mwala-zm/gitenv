@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Mode};
-use crate::form::{Form, LABELS};
+use crate::form::{Form, LABEL_WIDTH, LABELS};
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
@@ -53,6 +53,9 @@ fn render_help(frame: &mut Frame) {
         ("", ""),
         ("Applying writes user.name, user.email and, when set,", ""),
         ("user.signingkey and core.sshCommand into .git/config.", ""),
+        ("", ""),
+        ("● marks the profile git is using here; ◆ marks the one", ""),
+        ("whose remote or path rules claim this repo.", ""),
     ];
     let lines: Vec<Line> = rows
         .iter()
@@ -99,8 +102,8 @@ fn render_confirm_delete(frame: &mut Frame, app: &App) {
 }
 
 fn render_form(frame: &mut Frame, form: &Form) {
-    let label_width = 26;
-    let area = centered(frame.area(), 70, LABELS.len() as u16 + 4);
+    let label_width = LABEL_WIDTH;
+    let area = centered(frame.area(), 78, LABELS.len() as u16 + 4);
     // Columns left for the value: inside the borders, after the label, and
     // one spare cell so the cursor never lands on the right border.
     let value_width = (area.width as usize).saturating_sub(2 + label_width + 1);
@@ -159,15 +162,20 @@ fn render_header(frame: &mut Frame, area: Rect) {
 
 fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let active = app.active_profile();
+    let expected = app.expected_profile().map(|(p, _)| p);
 
     let items: Vec<ListItem> = app
         .config
         .profiles
         .iter()
         .map(|p| {
-            let marker = if active == Some(p) { "● " } else { "  " };
+            let (marker, colour) = match (active == Some(p), expected == Some(p)) {
+                (true, _) => ("● ", Color::Green),
+                (false, true) => ("◆ ", Color::Yellow),
+                (false, false) => ("  ", Color::Reset),
+            };
             let line = Line::from(vec![
-                Span::styled(marker, Style::new().fg(Color::Green)),
+                Span::styled(marker, Style::new().fg(colour)),
                 Span::raw(&p.name),
                 Span::raw("  "),
                 Span::styled(&p.email, Style::new().dim()),
@@ -230,13 +238,35 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         ])
     };
 
-    let verdict = match app.active_profile() {
-        Some(p) => Line::from(vec![
+    let active = app.active_profile();
+    let expected = app.expected_profile();
+    let verdict = match (&expected, active) {
+        (Some((want, _)), Some(have)) if *want != have => Line::from(vec![
+            "✘ ".red(),
+            format!("on profile '{}', should be '{}'", have.name, want.name)
+                .red()
+                .bold(),
+        ]),
+        (Some((want, _)), None) => Line::from(vec![
+            "✘ ".red(),
+            format!("matches no profile, should be '{}'", want.name)
+                .red()
+                .bold(),
+        ]),
+        (_, Some(p)) => Line::from(vec![
             "✔ ".green(),
             format!("matches profile '{}'", p.name).green(),
         ]),
-        None if app.config.profiles.is_empty() => Line::from("no profiles configured".dim()),
-        None => Line::from(vec!["✘ ".red(), "does not match any profile".red().bold()]),
+        (None, None) if app.config.profiles.is_empty() => {
+            Line::from("no profiles configured".dim())
+        }
+        (None, None) => Line::from(vec!["✘ ".red(), "does not match any profile".red().bold()]),
+    };
+    let rule_note = match &expected {
+        Some((want, why)) => {
+            Line::from(format!("rule: '{}' claims this repo ({why})", want.name).dim())
+        }
+        None => Line::from("no profile rule claims this repo".dim()),
     };
 
     let local_note = if repo.local.name.is_none() && repo.local.email.is_none() {
@@ -256,6 +286,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         field("ssh", &repo.effective.ssh_command),
         Line::from(""),
         verdict,
+        rule_note,
         local_note,
     ];
 

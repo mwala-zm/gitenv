@@ -100,7 +100,8 @@ pub fn ssh_command(key: &Path) -> String {
     format!("ssh -i {} -o IdentitiesOnly=yes", shell_quote(&path))
 }
 
-fn expand_tilde(path: &Path) -> PathBuf {
+/// `~` and `~/x` become the home directory and a path under it.
+pub fn expand_tilde(path: &Path) -> PathBuf {
     let Ok(rest) = path.strip_prefix("~") else {
         return path.to_path_buf();
     };
@@ -181,7 +182,7 @@ mod tests {
             user_name: "Ada".into(),
             email: "ada@example.com".into(),
             signing_key: key.map(Into::into),
-            ssh_key: None,
+            ..Default::default()
         }
     }
 

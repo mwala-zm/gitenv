@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 
 use crate::git::{self, Identity, Repo};
 use crate::profile::Config;
+use crate::rules::{self, Reason};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
@@ -25,6 +26,15 @@ pub enum Verdict {
         identity: Identity,
         no_profiles: bool,
     },
+    /// A rule says this repo belongs to `expected`, but the identity is
+    /// something else: another profile (`actual`) or nothing saved at all.
+    WrongProfile {
+        root: PathBuf,
+        expected: String,
+        reason: Reason,
+        actual: Option<String>,
+        identity: Identity,
+    },
 }
 
 impl Verdict {
@@ -35,7 +45,19 @@ impl Verdict {
 
 /// Decide whether `repo` is on a saved profile.
 pub fn verdict(config: &Config, repo: &Repo) -> Verdict {
-    match config.matching(&repo.effective) {
+    let actual = config.matching(&repo.effective);
+    if let Some((expected, reason)) = rules::expected(config, repo)
+        && actual != Some(expected)
+    {
+        return Verdict::WrongProfile {
+            root: repo.root.clone(),
+            expected: expected.name.clone(),
+            reason,
+            actual: actual.map(|p| p.name.clone()),
+            identity: repo.effective.clone(),
+        };
+    }
+    match actual {
         Some(profile) => Verdict::Match(profile.name.clone()),
         None => Verdict::Mismatch {
             root: repo.root.clone(),
@@ -43,6 +65,19 @@ pub fn verdict(config: &Config, repo: &Repo) -> Verdict {
             no_profiles: config.profiles.is_empty(),
         },
     }
+}
+
+fn write_identity(f: &mut fmt::Formatter<'_>, identity: &Identity) -> fmt::Result {
+    let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "(not set)".into());
+    writeln!(f, "  name         {}", show(&identity.name))?;
+    writeln!(f, "  email        {}", show(&identity.email))?;
+    if identity.signing_key.is_some() {
+        writeln!(f, "  signing key  {}", show(&identity.signing_key))?;
+    }
+    if identity.ssh_command.is_some() {
+        writeln!(f, "  ssh          {}", show(&identity.ssh_command))?;
+    }
+    Ok(())
 }
 
 impl fmt::Display for Verdict {
@@ -65,16 +100,30 @@ impl fmt::Display for Verdict {
                     "gitenv: git identity in {} does not match any saved profile",
                     root.display()
                 )?;
-                let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "(not set)".into());
-                writeln!(f, "  name         {}", show(&identity.name))?;
-                writeln!(f, "  email        {}", show(&identity.email))?;
-                if identity.signing_key.is_some() {
-                    writeln!(f, "  signing key  {}", show(&identity.signing_key))?;
-                }
-                if identity.ssh_command.is_some() {
-                    writeln!(f, "  ssh          {}", show(&identity.ssh_command))?;
-                }
+                write_identity(f, identity)?;
                 write!(f, "  run `gitenv` in that repo to pick a profile")
+            }
+            Verdict::WrongProfile {
+                root,
+                expected,
+                reason,
+                actual,
+                identity,
+            } => {
+                writeln!(
+                    f,
+                    "gitenv: {} should use profile '{expected}' ({reason})",
+                    root.display()
+                )?;
+                match actual {
+                    Some(name) => writeln!(f, "  but its identity is profile '{name}':")?,
+                    None => writeln!(f, "  but its identity matches no saved profile:")?,
+                }
+                write_identity(f, identity)?;
+                write!(
+                    f,
+                    "  run `gitenv` in that repo and press Enter on '{expected}'"
+                )
             }
         }
     }
@@ -131,10 +180,63 @@ mod tests {
                 name: "acme".into(),
                 user_name: "Ada".into(),
                 email: "ada@acme.example".into(),
-                signing_key: None,
-                ssh_key: None,
+                ..Default::default()
             }],
         }
+    }
+
+    fn config_with_rules() -> Config {
+        let mut config = config();
+        config.profiles[0].remotes = vec!["github.com/acme/*".into()];
+        config.profiles.push(Profile {
+            name: "personal".into(),
+            user_name: "Ada".into(),
+            email: "ada@example.com".into(),
+            ..Default::default()
+        });
+        config
+    }
+
+    #[test]
+    fn rule_overrides_a_match_on_another_profile() {
+        let mut r = repo(identity("ada@example.com"));
+        r.remote = Some("git@github.com:acme/api.git".into());
+        let v = verdict(&config_with_rules(), &r);
+        assert!(!v.is_ok());
+        let text = v.to_string();
+        assert!(text.contains("should use profile 'acme'"), "{text}");
+        assert!(text.contains("remote matches github.com/acme/*"), "{text}");
+        assert!(text.contains("is profile 'personal'"), "{text}");
+        assert!(text.contains("press Enter on 'acme'"), "{text}");
+    }
+
+    #[test]
+    fn rule_plus_unknown_identity_names_the_expected_profile() {
+        let mut r = repo(identity("someone@else.example"));
+        r.remote = Some("git@github.com:acme/api.git".into());
+        let text = verdict(&config_with_rules(), &r).to_string();
+        assert!(text.contains("matches no saved profile"), "{text}");
+        assert!(text.contains("someone@else.example"), "{text}");
+    }
+
+    #[test]
+    fn rule_satisfied_is_a_match() {
+        let mut r = repo(identity("ada@acme.example"));
+        r.remote = Some("git@github.com:acme/api.git".into());
+        assert_eq!(
+            verdict(&config_with_rules(), &r),
+            Verdict::Match("acme".into())
+        );
+    }
+
+    #[test]
+    fn no_rule_falls_back_to_any_profile() {
+        let mut r = repo(identity("ada@example.com"));
+        r.remote = Some("git@gitlab.com:someone/thing.git".into());
+        assert_eq!(
+            verdict(&config_with_rules(), &r),
+            Verdict::Match("personal".into())
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ exclude = [".github/", "packaging/"]
 [dependencies]
 anyhow = "1.0.104"
 directories = "6.0.0"
+glob = "0.3"
 ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.6"

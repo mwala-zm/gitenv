@@ -20,6 +20,7 @@ one of your saved profiles, and lets you switch with one key press.
 │                             ││signing key ABCD1234                    │
 │                             ││                                        │
 │                             ││✔ matches profile 'acme'                │
+│                             ││rule: 'acme' claims this repo (remote matches github.com/acme/*)
 │                             ││identity is set in this repo's .git/config
 └─────────────────────────────┘└────────────────────────────────────────┘
  ↑↓/jk select   Enter apply   e edit   n new   d delete   ? help   q quit
@@ -144,12 +145,39 @@ signing_key = "ABCD1234"
 ssh_key = "/Users/ada/.ssh/id_acme"
 ```
 
-`signing_key` and `ssh_key` are optional. When `ssh_key` is set, pushes from
+`signing_key`, `ssh_key`, `remotes` and `paths` are optional. When `ssh_key` is set, pushes from
 that repo use `ssh -i '<path>' -o IdentitiesOnly=yes`, so the right key is
 offered even if several are loaded in your agent. A leading `~` is expanded,
 and the path is quoted so spaces are fine. The ssh key counts towards the
 match: a repo with the right email but a different `core.sshCommand` is
 reported as not matching.
+
+## Rules
+
+Without rules, gitenv is happy as long as the repo's identity is *one of*
+your profiles. Rules let a profile claim repositories, so gitenv can tell
+you the repo is on the *wrong* profile:
+
+```toml
+[[profiles]]
+name = "acme"
+user_name = "Ada Lovelace"
+email = "ada@acme.example"
+remotes = ["github.com/acme/*", "gitlab.acme.example/**"]
+paths = ["~/work/acme/**"]
+```
+
+`remotes` are globs matched against the origin URL reduced to
+`host/owner/repo`, so `github.com/acme/*` matches
+`git@github.com:acme/api.git` and `https://github.com/acme/api.git` alike.
+`*` stops at a slash and `**` does not. `paths` are globs matched against
+the repository root; `~` is your home directory and `dir/**` also matches
+`dir` itself. The first profile with a matching rule wins.
+
+When a rule claims the repo, the TUI marks that profile with `◆`, highlights
+it on start so Enter applies it, and the repository pane says which profile
+the repo is on and which it should be on. `gitenv check` exits 1 with the
+same explanation, even if the current identity is another saved profile.
 
 ## Development
 

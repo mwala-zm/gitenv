@@ -3,6 +3,7 @@ mod check;
 mod form;
 mod git;
 mod profile;
+mod rules;
 mod ui;
 
 use std::path::PathBuf;

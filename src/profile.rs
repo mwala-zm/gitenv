@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_ENV: &str = "GITENV_CONFIG";
 
 /// One git identity. Serialised as a `[[profiles]]` table in the config file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
     /// Short label shown in the UI, e.g. `personal` or `acme-corp`.
     pub name: String,
@@ -23,6 +23,13 @@ pub struct Profile {
     /// Optional private key path, written as `core.sshCommand = ssh -i <path>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<PathBuf>,
+    /// Remote URL globs this profile claims, e.g. `github.com/acme/*`.
+    /// See `rules::normalize_remote` for the shape they are matched against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remotes: Vec<String>,
+    /// Repository path globs this profile claims, e.g. `~/work/acme/**`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// The whole config file.
@@ -87,8 +94,7 @@ mod tests {
                     name: "personal".into(),
                     user_name: "Ada Lovelace".into(),
                     email: "ada@example.com".into(),
-                    signing_key: None,
-                    ssh_key: None,
+                    ..Default::default()
                 },
                 Profile {
                     name: "acme".into(),
@@ -96,6 +102,8 @@ mod tests {
                     email: "ada@acme.example".into(),
                     signing_key: Some("ABCDEF".into()),
                     ssh_key: Some("/home/ada/.ssh/id_acme".into()),
+                    remotes: vec!["github.com/acme/*".into()],
+                    paths: vec!["~/work/acme/**".into()],
                 },
             ],
         };

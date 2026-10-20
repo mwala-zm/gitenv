@@ -12,13 +12,14 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::form::Form;
 use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
+use crate::rules::{self, Reason};
 
 /// What the screen is doing. Popups sit on top of the normal view.
 #[derive(Debug, Clone)]
 pub enum Mode {
     Normal,
     Help,
-    Edit(Form),
+    Edit(Box<Form>),
     /// Asking whether to delete the highlighted profile.
     ConfirmDelete,
 }
@@ -51,7 +52,7 @@ impl App {
                     user_name,
                     email,
                     signing_key: global.signing_key,
-                    ssh_key: None,
+                    ..Default::default()
                 });
                 config.save(&config_path)?;
             }
@@ -78,6 +79,12 @@ impl App {
         self.config.matching(&repo.effective)
     }
 
+    /// The profile whose rules claim this repo, and the rule that fired.
+    pub fn expected_profile(&self) -> Option<(&Profile, Reason)> {
+        let repo = self.repo.as_ref()?;
+        rules::expected(&self.config, repo)
+    }
+
     pub fn selected_profile(&self) -> Option<&Profile> {
         self.config.profiles.get(self.selected)
     }
@@ -100,10 +107,10 @@ impl App {
             (KeyCode::Enter, _) => self.apply_selected(),
             (KeyCode::Char('r'), _) => self.refresh(),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
-            (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Form::new()),
+            (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
             (KeyCode::Char('e'), _) => {
                 if let Some(profile) = self.selected_profile() {
-                    self.mode = Mode::Edit(Form::edit(self.selected, profile));
+                    self.mode = Mode::Edit(Box::new(Form::edit(self.selected, profile)));
                 } else {
                     self.status = Some("No profile to edit; press n to create one".into());
                 }
@@ -246,10 +253,16 @@ impl App {
         }
     }
 
-    /// Move the highlight onto the profile that is currently active.
+    /// Move the highlight onto the profile the repo should be on: the one
+    /// a rule claims it for, else the one that is currently active. With a
+    /// rule violation that puts Enter on the fix.
     fn select_active(&mut self) {
-        if let Some(active) = self.active_profile()
-            && let Some(idx) = self.config.profiles.iter().position(|p| p == active)
+        let target = self
+            .expected_profile()
+            .map(|(p, _)| p)
+            .or_else(|| self.active_profile());
+        if let Some(target) = target
+            && let Some(idx) = self.config.profiles.iter().position(|p| p == target)
         {
             self.selected = idx;
         }
@@ -279,9 +292,33 @@ mod tests {
             name: name.into(),
             user_name: "Ada".into(),
             email: "ada@example.com".into(),
-            signing_key: None,
-            ssh_key: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn startup_highlights_the_profile_a_rule_claims() {
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        acme.remotes = vec!["github.com/acme/*".into()];
+        let mut app = app_with("rule", vec![profile("personal"), acme]);
+        app.repo = Some(Repo {
+            root: "/work/acme/api".into(),
+            remote: Some("git@github.com:acme/api.git".into()),
+            effective: git::Identity {
+                name: Some("Ada".into()),
+                email: Some("ada@example.com".into()),
+                ..Default::default()
+            },
+            local: Default::default(),
+        });
+        // Identity is 'personal' (index 0) but the rule says 'acme'.
+        app.select_active();
+        assert_eq!(app.selected, 1);
+        assert_eq!(
+            app.active_profile().map(|p| p.name.as_str()),
+            Some("personal")
+        );
     }
 
     #[test]
@@ -337,7 +374,7 @@ mod tests {
     #[test]
     fn control_chords_do_not_type_into_the_form() {
         let mut app = app_with("chords", vec![]);
-        app.mode = Mode::Edit(Form::new());
+        app.mode = Mode::Edit(Box::new(Form::new()));
         app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT));
