@@ -91,6 +91,17 @@ Applying a profile sets `user.name`, `user.email`, and optionally
 `user.signingkey` and `core.sshCommand` in the repo's local config. Local
 config always wins over `~/.gitconfig`, so the global identity is left alone.
 
+### Shell completions
+
+Homebrew installs them for you. Elsewhere, generate the script for your
+shell and put it where the shell looks:
+
+```sh
+gitenv completions zsh  > ~/.zfunc/_gitenv            # zsh (fpath must include ~/.zfunc)
+gitenv completions bash > ~/.local/share/bash-completion/completions/gitenv
+gitenv completions fish > ~/.config/fish/completions/gitenv.fish
+```
+
 ## Hooks
 
 `gitenv check` exits 0 when the repo's identity matches a saved profile, 1

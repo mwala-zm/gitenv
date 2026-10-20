@@ -32,6 +32,7 @@ class Gitenv < Formula
   def install
     bin.install "gitenv"
     doc.install "README.md"
+    generate_completions_from_executable(bin/"gitenv", "completions")
   end
 
   test do
