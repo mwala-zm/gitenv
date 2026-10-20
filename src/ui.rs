@@ -179,6 +179,39 @@ fn render_header(frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(title), area);
 }
 
+/// Dim wordmark drawn in the empty part of the profiles pane, figlet
+/// standard font. Purely decorative: it is skipped when the pane is too
+/// small or the list would run into it.
+const WORDMARK: [&str; 6] = [
+    r"       _ _",
+    r"  __ _(_) |_  ___ _ __ __   __",
+    r" / _` | | __|/ _ \ '_ \ \ / /",
+    r"| (_| | | |_|  __/ | | |\ V /",
+    r" \__, |_|\__|\___|_| |_| \_/",
+    r" |___/",
+];
+
+/// Draw the wordmark at the bottom of `inner` if it fits below the first
+/// `used_rows` rows with a blank row to spare.
+fn render_wordmark(frame: &mut Frame, inner: Rect, used_rows: u16) {
+    let height = WORDMARK.len() as u16;
+    let width = WORDMARK.iter().map(|l| l.len()).max().unwrap_or(0) as u16;
+    if inner.width < width || inner.height < used_rows.saturating_add(height + 1) {
+        return;
+    }
+    let area = Rect::new(
+        inner.x + (inner.width - width) / 2,
+        inner.y + inner.height - height,
+        width,
+        height,
+    );
+    let lines: Vec<Line> = WORDMARK.iter().map(|l| Line::from(*l)).collect();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().fg(Color::DarkGray)),
+        area,
+    );
+}
+
 fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let active = app.active_profile();
     let expected = app.expected_profile().map(|(p, _)| p);
@@ -204,6 +237,7 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let block = Block::bordered().title(" Profiles ");
+    let inner = block.inner(area);
 
     if items.is_empty() {
         let hint = Paragraph::new(vec![
@@ -220,8 +254,11 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
         .wrap(Wrap { trim: false })
         .block(block);
         frame.render_widget(hint, area);
+        // The hint is nine lines; allow two more for the path wrapping.
+        render_wordmark(frame, inner, 11);
         return;
     }
+    let used_rows = items.len() as u16;
 
     let list = List::new(items)
         .block(block)
@@ -235,6 +272,7 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.selected));
     frame.render_stateful_widget(list, area, &mut state);
+    render_wordmark(frame, inner, used_rows);
 }
 
 fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
