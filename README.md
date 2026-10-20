@@ -32,8 +32,11 @@ gitenv shells out to `git`, so git must be installed.
 **Homebrew** (macOS and Linux):
 
 ```sh
-brew install mwala-zm/tap/gitenv
+brew tap mwala-zm/tap
+brew install gitenv
 ```
+
+Or in one step: `brew install mwala-zm/tap/gitenv`.
 
 **Debian, Ubuntu** and **Fedora, RHEL, openSUSE**: each
 [GitHub release](https://github.com/mwala-zm/gitenv/releases/latest) has a
