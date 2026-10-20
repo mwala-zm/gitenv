@@ -18,6 +18,6 @@ To check a formula or PKGBUILD by hand before tagging, put the four release
 archives in a directory and run:
 
 ```sh
-packaging/render.sh 0.1.0 path/to/archives out
+packaging/render.sh 0.2.0 path/to/archives out
 brew style out/gitenv.rb
 ```
