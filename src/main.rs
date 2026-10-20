@@ -1,5 +1,6 @@
 mod app;
 mod check;
+mod cmd;
 mod form;
 mod git;
 mod profile;
@@ -52,6 +53,32 @@ enum Command {
         /// Directory inside the repository to check
         path: Option<PathBuf>,
     },
+    /// Write a profile into the repo's .git/config without the UI
+    ///
+    /// Sets user.name, user.email and, when the profile has them,
+    /// user.signingkey and core.sshCommand, exactly as Enter does in the
+    /// UI. Without PROFILE, applies the profile whose rules claim the
+    /// repo, which makes `gitenv apply` a one-liner for a post-checkout
+    /// hook or a clone wrapper.
+    Apply {
+        /// Profile name; defaults to the one whose rules claim this repo
+        profile: Option<String>,
+        /// Directory inside the repository
+        #[arg(long, short, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show what git would use here and whether it is the right profile
+    ///
+    /// Exit codes match `check`. With --short, prints one token for a
+    /// shell prompt: the profile name, `personal -> acme` when a rule
+    /// says another profile should be in use, or `?` when nothing matches.
+    Status {
+        /// One token for a shell prompt
+        #[arg(long, short)]
+        short: bool,
+        /// Directory inside the repository
+        path: Option<PathBuf>,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// For example: `gitenv completions zsh > ~/.zfunc/_gitenv`.
@@ -66,6 +93,20 @@ fn main() -> Result<ExitCode> {
     match cli.command {
         Some(Command::Check { path }) => Ok(match resolve_dir(path) {
             Ok(dir) => check::run(&dir),
+            Err(err) => {
+                eprintln!("gitenv: {err:#}");
+                ExitCode::from(2)
+            }
+        }),
+        Some(Command::Apply { profile, path }) => Ok(match resolve_dir(Some(path)) {
+            Ok(dir) => cmd::apply(profile.as_deref(), &dir),
+            Err(err) => {
+                eprintln!("gitenv: {err:#}");
+                ExitCode::from(2)
+            }
+        }),
+        Some(Command::Status { short, path }) => Ok(match resolve_dir(path) {
+            Ok(dir) => cmd::status(short, &dir),
             Err(err) => {
                 eprintln!("gitenv: {err:#}");
                 ExitCode::from(2)

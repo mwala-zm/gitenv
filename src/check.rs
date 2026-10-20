@@ -10,9 +10,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::git::{self, Identity, Repo};
+use crate::git::{Identity, Repo};
 use crate::profile::Config;
 use crate::rules::{self, Reason};
 
@@ -145,9 +145,7 @@ pub fn run(dir: &Path) -> ExitCode {
 }
 
 fn try_run(dir: &Path) -> Result<Verdict> {
-    let config = Config::load(&Config::path()?)?;
-    let repo = git::discover(dir)?
-        .with_context(|| format!("{} is not inside a git repository", dir.display()))?;
+    let (config, repo) = crate::cmd::load(dir)?;
     Ok(verdict(&config, &repo))
 }
 

@@ -74,6 +74,10 @@ Run it inside any repository, or point it at one:
 cd ~/work/acme/api && gitenv
 gitenv ~/work/acme/api
 gitenv check             # no UI: just the exit code, for hooks and scripts
+gitenv status            # what git would use here, and whether it is right
+gitenv status --short    # one token for a shell prompt, e.g. `acme`
+gitenv apply acme        # write a profile into .git/config without the UI
+gitenv apply             # apply whichever profile's rules claim this repo
 ```
 
 | Key | Action |
@@ -90,6 +94,31 @@ gitenv check             # no UI: just the exit code, for hooks and scripts
 Applying a profile sets `user.name`, `user.email`, and optionally
 `user.signingkey` and `core.sshCommand` in the repo's local config. Local
 config always wins over `~/.gitconfig`, so the global identity is left alone.
+
+### Scripts and prompts
+
+`gitenv apply <profile>` does what Enter does in the UI, and `gitenv apply`
+with no name applies the profile whose [rules](#rules) claim the repo. Both
+take `--path DIR` to act on a repo you are not inside. That makes a
+post-checkout hook or a clone wrapper a one-liner:
+
+```sh
+git clone git@github.com:acme/api.git && gitenv apply --path api
+```
+
+`gitenv status` prints the repo, remote, identity, matching profile, the
+rule that applies and a verdict. `gitenv status --short` prints one token
+and exits like `check`, so a prompt can colour it: `acme` when all is well,
+`personal -> acme` when a rule says another profile should be in use, `?`
+when nothing matches. For [Starship](https://starship.rs):
+
+```toml
+[custom.gitenv]
+command = "gitenv status --short"
+when = "git rev-parse --is-inside-work-tree"
+format = "[$output]($style) "
+style = "yellow"
+```
 
 ### Shell completions
 
