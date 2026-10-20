@@ -169,6 +169,7 @@ mod tests {
             remote: None,
             local: identity.clone(),
             effective: identity,
+            authors: Vec::new(),
         }
     }
 

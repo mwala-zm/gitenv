@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 
 use crate::app::{App, Mode};
 use crate::form::{Form, LABEL_WIDTH, LABELS};
+use crate::git::Repo;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
@@ -275,7 +276,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         Line::from("identity is set in this repo's .git/config".dim())
     };
 
-    let lines = vec![
+    let mut lines = vec![
         field("root", &Some(repo.root.display().to_string())),
         field("remote", &repo.remote),
         Line::from(""),
@@ -289,11 +290,48 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         rule_note,
         local_note,
     ];
+    lines.extend(history_lines(repo));
 
     let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(block);
     frame.render_widget(text, area);
+}
+
+/// The author audit: were recent commits made with a different identity?
+fn history_lines(repo: &Repo) -> Vec<Line<'static>> {
+    let inspected = repo.commits_inspected();
+    if inspected == 0 {
+        return Vec::new();
+    }
+    let foreign = repo.foreign_authors();
+    let mut lines = vec![Line::from(""), Line::from("Recent commits".bold())];
+    if foreign.is_empty() {
+        lines.push(Line::from(
+            format!("last {inspected} all authored with the current email").dim(),
+        ));
+        return lines;
+    }
+    let count: usize = foreign.iter().map(|a| a.commits).sum();
+    lines.push(Line::from(vec![
+        "⚠ ".yellow(),
+        format!("{count} of the last {inspected} were authored with another email:").yellow(),
+    ]));
+    for author in foreign.iter().take(3) {
+        lines.push(Line::from(
+            format!(
+                "  {:>3}  {} <{}>",
+                author.commits, author.name, author.email
+            )
+            .yellow(),
+        ));
+    }
+    if foreign.len() > 3 {
+        lines.push(Line::from(
+            format!("  and {} more", foreign.len() - 3).dim(),
+        ));
+    }
+    lines
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {

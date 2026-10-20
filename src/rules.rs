@@ -219,6 +219,7 @@ mod tests {
             remote: remote.map(Into::into),
             effective: Default::default(),
             local: Default::default(),
+            authors: Vec::new(),
         }
     }
 

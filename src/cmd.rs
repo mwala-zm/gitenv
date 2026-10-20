@@ -132,6 +132,28 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
         "this repo's .git/config"
     };
     out.push(format!("source       {source}"));
+    let foreign = repo.foreign_authors();
+    if repo.commits_inspected() > 0 {
+        let line = if foreign.is_empty() {
+            format!(
+                "history      last {} commits all by the current email",
+                repo.commits_inspected()
+            )
+        } else {
+            let who: Vec<String> = foreign
+                .iter()
+                .take(3)
+                .map(|a| format!("{} ({})", a.email, a.commits))
+                .collect();
+            format!(
+                "history      {} of the last {} commits by another email: {}",
+                foreign.iter().map(|a| a.commits).sum::<usize>(),
+                repo.commits_inspected(),
+                who.join(", ")
+            )
+        };
+        out.push(line);
+    }
     out.push(format!(
         "profile      {}",
         config
@@ -193,6 +215,7 @@ mod tests {
                 ..Default::default()
             },
             local: Identity::default(),
+            authors: Vec::new(),
         };
         (config, repo)
     }
@@ -214,8 +237,26 @@ mod tests {
 
     #[test]
     fn long_status_lists_everything() {
-        let (config, repo) = setup();
+        let (config, mut repo) = setup();
+        repo.authors = vec![
+            git::Author {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+                commits: 7,
+            },
+            git::Author {
+                name: "Ada".into(),
+                email: "ada@acme.example".into(),
+                commits: 3,
+            },
+        ];
         let text = long_status(&config, &repo, &check::verdict(&config, &repo));
+        assert!(
+            text.contains(
+                "history      3 of the last 10 commits by another email: ada@acme.example (3)"
+            ),
+            "{text}"
+        );
         assert!(text.contains("repo         /work/acme/api"));
         assert!(text.contains("source       global config"));
         assert!(text.contains("profile      personal"));

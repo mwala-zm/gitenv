@@ -39,6 +39,17 @@ impl Identity {
     }
 }
 
+/// How many recent commits the author audit looks at.
+pub const HISTORY_DEPTH: usize = 20;
+
+/// One author seen in recent history and how many of those commits are theirs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    pub email: String,
+    pub commits: usize,
+}
+
 /// A git repository the tool is looking at.
 #[derive(Debug, Clone)]
 pub struct Repo {
@@ -48,6 +59,25 @@ pub struct Repo {
     pub effective: Identity,
     /// Only what is set in `.git/config`, ignoring global config.
     pub local: Identity,
+    /// Authors of the last [`HISTORY_DEPTH`] commits on the current branch,
+    /// most frequent first. Empty for a repo with no commits yet.
+    pub authors: Vec<Author>,
+}
+
+impl Repo {
+    /// Commits actually inspected: at most [`HISTORY_DEPTH`].
+    pub fn commits_inspected(&self) -> usize {
+        self.authors.iter().map(|a| a.commits).sum()
+    }
+
+    /// Recent authors whose email is not the one git would use now. These
+    /// are the commits that were probably made on the wrong identity.
+    pub fn foreign_authors(&self) -> Vec<&Author> {
+        self.authors
+            .iter()
+            .filter(|a| Some(a.email.as_str()) != self.effective.email.as_deref())
+            .collect()
+    }
 }
 
 /// Find the repository containing `dir`. Returns `None` when `dir` is not
@@ -67,8 +97,41 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
         remote: config_get(&root, &["--get", "remote.origin.url"]),
         effective: read_identity(&root, &[]),
         local: read_identity(&root, &["--local"]),
+        authors: recent_authors(&root, HISTORY_DEPTH),
         root,
     }))
+}
+
+/// Authors of the last `depth` commits on HEAD, most frequent first. A repo
+/// without commits, or any git failure, gives an empty list.
+pub fn recent_authors(root: &Path, depth: usize) -> Vec<Author> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["log", "-n", &depth.to_string(), "--format=%ae%x09%an"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let mut authors: Vec<Author> = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((email, name)) = line.split_once('\t') else {
+            continue;
+        };
+        match authors.iter_mut().find(|a| a.email == email) {
+            Some(a) => a.commits += 1,
+            None => authors.push(Author {
+                name: name.to_string(),
+                email: email.to_string(),
+                commits: 1,
+            }),
+        }
+    }
+    authors.sort_by_key(|a| std::cmp::Reverse(a.commits));
+    authors
 }
 
 /// The identity from `~/.gitconfig` alone. Used to seed a first profile.
@@ -273,6 +336,76 @@ mod tests {
         let repo = discover(&dir).unwrap().unwrap();
         assert!(repo.local.signing_key.is_none());
         assert!(config_get(&dir, &["--local", "--get", "core.sshCommand"]).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn recent_authors_counts_who_made_the_last_commits() {
+        let dir = std::env::temp_dir().join(format!("gitenv-authors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .env("GIT_COMMITTER_NAME", "C")
+                    .env("GIT_COMMITTER_EMAIL", "c@example.com")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        let repo = discover(&dir).unwrap().unwrap();
+        assert!(repo.authors.is_empty(), "no commits yet");
+        assert_eq!(repo.commits_inspected(), 0);
+
+        git(&[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@acme.example",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "one",
+        ]);
+        git(&[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "two",
+        ]);
+        git(&[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "three",
+        ]);
+        git(&["config", "--local", "user.email", "ada@acme.example"]);
+        git(&["config", "--local", "user.name", "Ada"]);
+
+        let repo = discover(&dir).unwrap().unwrap();
+        assert_eq!(repo.commits_inspected(), 3);
+        assert_eq!(repo.authors[0].email, "ada@example.com");
+        assert_eq!(repo.authors[0].commits, 2);
+        let foreign = repo.foreign_authors();
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].email, "ada@example.com");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

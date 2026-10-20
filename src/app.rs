@@ -311,6 +311,7 @@ mod tests {
                 ..Default::default()
             },
             local: Default::default(),
+            authors: Vec::new(),
         });
         // Identity is 'personal' (index 0) but the rule says 'acme'.
         app.select_active();

@@ -152,6 +152,14 @@ gitenv completions bash > ~/.local/share/bash-completion/completions/gitenv
 gitenv completions fish > ~/.config/fish/completions/gitenv.fish
 ```
 
+### Catching past mistakes
+
+Switching identity only protects the next commit. The repository pane and
+`gitenv status` also look at the authors of the last 20 commits on the
+current branch and warn when some were made with a different email than
+the one git would use now, with a count per author. Use `git rebase` with
+`--reset-author` or `git filter-repo` to repair those before pushing.
+
 ## Hooks
 
 `gitenv check` exits 0 when the repo's identity matches a saved profile, 1
