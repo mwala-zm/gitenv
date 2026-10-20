@@ -53,7 +53,8 @@ fn render_help(frame: &mut Frame) {
         ("q  Esc", "quit"),
         ("", ""),
         ("Applying writes user.name, user.email and, when set,", ""),
-        ("user.signingkey and core.sshCommand into .git/config.", ""),
+        ("user.signingkey, gpg.format, commit.gpgsign and", ""),
+        ("core.sshCommand into .git/config.", ""),
         ("", ""),
         ("● marks the profile git is using here; ◆ marks the one", ""),
         ("whose remote or path rules claim this repo.", ""),
@@ -284,6 +285,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         field("name", &repo.effective.name),
         field("email", &repo.effective.email),
         field("signing key", &repo.effective.signing_key),
+        field("signing", &signing_summary(repo)),
         field("ssh", &repo.effective.ssh_command),
         Line::from(""),
         verdict,
@@ -296,6 +298,25 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         .wrap(Wrap { trim: false })
         .block(block);
     frame.render_widget(text, area);
+}
+
+/// `gpg.format` and `commit.gpgsign` in one phrase, or `None` when neither
+/// is set anywhere.
+fn signing_summary(repo: &Repo) -> Option<String> {
+    let id = &repo.effective;
+    if id.signing_format.is_none() && id.sign_commits.is_none() {
+        return None;
+    }
+    let format = id
+        .signing_format
+        .unwrap_or(crate::profile::SigningFormat::Openpgp)
+        .as_git();
+    let sign = if id.sign_commits.unwrap_or(false) {
+        "commits signed"
+    } else {
+        "commits not signed"
+    };
+    Some(format!("{format}, {sign}"))
 }
 
 /// The author audit: were recent commits made with a different identity?

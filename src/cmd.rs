@@ -120,6 +120,12 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
             show(&repo.effective.signing_key)
         ));
     }
+    if let Some(format) = repo.effective.signing_format {
+        out.push(format!("signing      {}", format.as_git()));
+    }
+    if let Some(sign) = repo.effective.sign_commits {
+        out.push(format!("sign commits {}", if sign { "yes" } else { "no" }));
+    }
     if repo.effective.ssh_command.is_some() {
         out.push(format!(
             "ssh          {}",

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::profile::Profile;
+use crate::profile::{Profile, SigningFormat};
 
 /// The identity git would use for a commit right now.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,6 +19,19 @@ pub struct Identity {
     pub signing_key: Option<String>,
     /// Value of `core.sshCommand`, which decides which ssh key is offered.
     pub ssh_command: Option<String>,
+    /// Value of `gpg.format`.
+    pub signing_format: Option<SigningFormat>,
+    /// Value of `commit.gpgsign`, if git could parse it as a boolean.
+    pub sign_commits: Option<bool>,
+}
+
+/// Parse a git boolean: `true`, `yes`, `on`, `1` and their opposites.
+pub fn git_bool(s: &str) -> Option<bool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" | "" => Some(false),
+        _ => None,
+    }
 }
 
 impl Identity {
@@ -35,7 +48,17 @@ impl Identity {
             Some(key) => self.ssh_command.as_deref() == Some(ssh_command(key).as_str()),
             None => true,
         };
-        name_ok && email_ok && key_ok && ssh_ok
+        // Git defaults gpg.format to openpgp, so an unset value satisfies
+        // a profile that asks for openpgp. An unset commit.gpgsign is off.
+        let format_ok = match profile.signing_format {
+            Some(want) => self.signing_format.unwrap_or(SigningFormat::Openpgp) == want,
+            None => true,
+        };
+        let sign_ok = match profile.sign_commits {
+            Some(want) => self.sign_commits.unwrap_or(false) == want,
+            None => true,
+        };
+        name_ok && email_ok && key_ok && ssh_ok && format_ok && sign_ok
     }
 }
 
@@ -152,6 +175,18 @@ pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
         Some(key) => config_set(&repo.root, "core.sshCommand", &ssh_command(key))?,
         None => config_unset(&repo.root, "core.sshCommand")?,
     }
+    match profile.signing_format {
+        Some(format) => config_set(&repo.root, "gpg.format", format.as_git())?,
+        None => config_unset(&repo.root, "gpg.format")?,
+    }
+    match profile.sign_commits {
+        Some(sign) => config_set(
+            &repo.root,
+            "commit.gpgsign",
+            if sign { "true" } else { "false" },
+        )?,
+        None => config_unset(&repo.root, "commit.gpgsign")?,
+    }
     Ok(())
 }
 
@@ -190,6 +225,8 @@ fn read_identity(root: &Path, scope: &[&str]) -> Identity {
         email: get("user.email"),
         signing_key: get("user.signingkey"),
         ssh_command: get("core.sshCommand"),
+        signing_format: get("gpg.format").and_then(|s| SigningFormat::parse(&s)),
+        sign_commits: get("commit.gpgsign").and_then(|s| git_bool(&s)),
     }
 }
 
@@ -254,8 +291,7 @@ mod tests {
         let id = Identity {
             name: Some("Ada".into()),
             email: Some("ada@example.com".into()),
-            signing_key: None,
-            ssh_command: None,
+            ..Default::default()
         };
         assert!(id.matches(&profile(None)));
         assert!(!id.matches(&profile(Some("KEY"))));
@@ -268,8 +304,8 @@ mod tests {
         let mut id = Identity {
             name: Some("Ada".into()),
             email: Some("ada@example.com".into()),
-            signing_key: None,
             ssh_command: Some(ssh_command(Path::new("/tmp/id_b"))),
+            ..Default::default()
         };
         assert!(!id.matches(&p));
         id.ssh_command = Some(ssh_command(Path::new("/tmp/id_a")));
@@ -319,12 +355,16 @@ mod tests {
         let repo = discover(&dir).unwrap().expect("temp dir should be a repo");
         let mut p = profile(Some("KEY123"));
         p.ssh_key = Some("/tmp/id_test".into());
+        p.signing_format = Some(SigningFormat::Ssh);
+        p.sign_commits = Some(true);
         apply(&repo, &p).unwrap();
 
         let repo = discover(&dir).unwrap().unwrap();
         assert_eq!(repo.local.name.as_deref(), Some("Ada"));
         assert_eq!(repo.local.email.as_deref(), Some("ada@example.com"));
         assert_eq!(repo.local.signing_key.as_deref(), Some("KEY123"));
+        assert_eq!(repo.local.signing_format, Some(SigningFormat::Ssh));
+        assert_eq!(repo.local.sign_commits, Some(true));
         assert!(repo.effective.matches(&p));
         assert_eq!(
             config_get(&dir, &["--local", "--get", "core.sshCommand"]).as_deref(),
@@ -336,6 +376,8 @@ mod tests {
         let repo = discover(&dir).unwrap().unwrap();
         assert!(repo.local.signing_key.is_none());
         assert!(config_get(&dir, &["--local", "--get", "core.sshCommand"]).is_none());
+        assert!(repo.local.signing_format.is_none());
+        assert!(repo.local.sign_commits.is_none());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -411,12 +453,45 @@ mod tests {
     }
 
     #[test]
+    fn signing_format_and_gpgsign_count_towards_the_match() {
+        let mut p = profile(Some("~/.ssh/id.pub"));
+        p.signing_format = Some(SigningFormat::Ssh);
+        p.sign_commits = Some(true);
+        let mut id = Identity {
+            name: Some("Ada".into()),
+            email: Some("ada@example.com".into()),
+            signing_key: Some("~/.ssh/id.pub".into()),
+            ..Default::default()
+        };
+        assert!(
+            !id.matches(&p),
+            "unset format is openpgp, unset gpgsign is off"
+        );
+        id.signing_format = Some(SigningFormat::Ssh);
+        assert!(!id.matches(&p), "still not signing");
+        id.sign_commits = Some(true);
+        assert!(id.matches(&p));
+
+        // A profile asking for openpgp is satisfied by git's default.
+        p.signing_format = Some(SigningFormat::Openpgp);
+        id.signing_format = None;
+        assert!(id.matches(&p));
+    }
+
+    #[test]
+    fn git_booleans() {
+        assert_eq!(git_bool("yes"), Some(true));
+        assert_eq!(git_bool("TRUE"), Some(true));
+        assert_eq!(git_bool("0"), Some(false));
+        assert_eq!(git_bool("maybe"), None);
+    }
+
+    #[test]
     fn wrong_email_does_not_match() {
         let id = Identity {
             name: Some("Ada".into()),
             email: Some("ada@other.example".into()),
-            signing_key: None,
-            ssh_command: None,
+            ..Default::default()
         };
         assert!(!id.matches(&profile(None)));
     }

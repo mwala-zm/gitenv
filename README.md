@@ -93,7 +93,8 @@ gitenv scan ~/work       # every repo under a directory, and its verdict
 | `q` or `Esc` | quit |
 
 Applying a profile sets `user.name`, `user.email`, and optionally
-`user.signingkey` and `core.sshCommand` in the repo's local config. Local
+`user.signingkey`, `gpg.format`, `commit.gpgsign` and `core.sshCommand` in
+the repo's local config. Local
 config always wins over `~/.gitconfig`, so the global identity is left alone.
 
 ### Scripts and prompts
@@ -212,9 +213,22 @@ user_name = "Ada Lovelace"
 email = "ada@acme.example"
 signing_key = "ABCD1234"
 ssh_key = "/Users/ada/.ssh/id_acme"
+
+[[profiles]]
+name = "oss"
+user_name = "Ada Lovelace"
+email = "ada@example.com"
+signing_key = "~/.ssh/id_ed25519.pub"
+signing_format = "ssh"
+sign_commits = true
 ```
 
-`signing_key`, `ssh_key`, `remotes` and `paths` are optional. When `ssh_key` is set, pushes from
+Everything after `email` is optional. `signing_format` is written to
+`gpg.format` (`openpgp`, `ssh` or `x509`) and `sign_commits` to
+`commit.gpgsign`; with SSH signing, `signing_key` is the path to the public
+key. Both count towards the match, so a repo that would make unsigned or
+GPG-signed commits when the profile asks for SSH-signed ones is reported as
+not matching. Leaving them out leaves git's own setting alone. When `ssh_key` is set, pushes from
 that repo use `ssh -i '<path>' -o IdentitiesOnly=yes`, so the right key is
 offered even if several are loaded in your agent. A leading `~` is expanded,
 and the path is quoted so spaces are fine. The ssh key counts towards the

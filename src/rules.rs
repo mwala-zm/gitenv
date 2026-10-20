@@ -206,10 +206,9 @@ mod tests {
             name: name.into(),
             user_name: "Ada".into(),
             email: format!("ada@{name}.example"),
-            signing_key: None,
-            ssh_key: None,
             remotes: remotes.iter().map(|s| s.to_string()).collect(),
             paths: paths.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         }
     }
 

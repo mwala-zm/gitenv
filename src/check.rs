@@ -158,8 +158,7 @@ mod tests {
         Identity {
             name: Some("Ada".into()),
             email: Some(email.into()),
-            signing_key: None,
-            ssh_command: None,
+            ..Default::default()
         }
     }
 

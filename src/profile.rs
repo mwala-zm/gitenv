@@ -8,6 +8,36 @@ use serde::{Deserialize, Serialize};
 /// Environment variable that overrides the config file location.
 pub const CONFIG_ENV: &str = "GITENV_CONFIG";
 
+/// Value for `gpg.format`: how commits are signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SigningFormat {
+    Openpgp,
+    Ssh,
+    X509,
+}
+
+impl SigningFormat {
+    /// The string git uses for `gpg.format`.
+    pub fn as_git(self) -> &'static str {
+        match self {
+            SigningFormat::Openpgp => "openpgp",
+            SigningFormat::Ssh => "ssh",
+            SigningFormat::X509 => "x509",
+        }
+    }
+
+    /// Parse what a user might type: git's names plus `gpg` for openpgp.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "openpgp" | "gpg" | "pgp" => Some(SigningFormat::Openpgp),
+            "ssh" => Some(SigningFormat::Ssh),
+            "x509" | "x.509" | "smime" => Some(SigningFormat::X509),
+            _ => None,
+        }
+    }
+}
+
 /// One git identity. Serialised as a `[[profiles]]` table in the config file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Profile {
@@ -23,6 +53,13 @@ pub struct Profile {
     /// Optional private key path, written as `core.sshCommand = ssh -i <path>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<PathBuf>,
+    /// Optional value for `gpg.format`. With `ssh`, `signing_key` is the
+    /// path to a public key (or `key::ssh-ed25519 AAAA...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_format: Option<SigningFormat>,
+    /// Optional value for `commit.gpgsign`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_commits: Option<bool>,
     /// Remote URL globs this profile claims, e.g. `github.com/acme/*`.
     /// See `rules::normalize_remote` for the shape they are matched against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -100,16 +137,28 @@ mod tests {
                     name: "acme".into(),
                     user_name: "Ada Lovelace".into(),
                     email: "ada@acme.example".into(),
-                    signing_key: Some("ABCDEF".into()),
+                    signing_key: Some("~/.ssh/id_acme.pub".into()),
                     ssh_key: Some("/home/ada/.ssh/id_acme".into()),
+                    signing_format: Some(SigningFormat::Ssh),
+                    sign_commits: Some(true),
                     remotes: vec!["github.com/acme/*".into()],
                     paths: vec!["~/work/acme/**".into()],
                 },
             ],
         };
         let text = toml::to_string_pretty(&config).unwrap();
+        assert!(text.contains("signing_format = \"ssh\""), "{text}");
+        assert!(text.contains("sign_commits = true"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn signing_format_parses_what_people_type() {
+        assert_eq!(SigningFormat::parse("SSH"), Some(SigningFormat::Ssh));
+        assert_eq!(SigningFormat::parse("gpg"), Some(SigningFormat::Openpgp));
+        assert_eq!(SigningFormat::parse("x509"), Some(SigningFormat::X509));
+        assert_eq!(SigningFormat::parse("pigeon"), None);
     }
 
     #[test]
