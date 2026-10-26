@@ -239,12 +239,14 @@ email = "ada@acme.example"
 
 [profiles.git]
 "url.git@github.com:acme/.insteadOf" = "https://github.com/acme/"
-pull.rebase = "true"
+pull.rebase = true
 ```
 
-Those keys are written with the profile and checked when matching, but
-applying another profile does not remove them, since gitenv cannot know
-which keys the other profile would want gone. `signing_format` is written to
+Those keys are written with the profile and checked when matching. gitenv
+notes the keys it wrote under `gitenv.managed` in the repo's config, so
+applying another profile removes the ones that profile does not set; keys
+you set by hand are left alone. Dotted keys can be written bare
+(`pull.rebase = true`) or quoted (`"pull.rebase" = "true"`). `signing_format` is written to
 `gpg.format` (`openpgp`, `ssh` or `x509`) and `sign_commits` to
 `commit.gpgsign`; with SSH signing, `signing_key` is the path to the public
 key. Both count towards the match, so a repo that would make unsigned or

@@ -239,11 +239,24 @@ pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
         )?,
         None => config_unset(&repo.root, "commit.gpgsign")?,
     }
+    // Remember which extra keys this profile wrote, so applying another
+    // profile later removes them instead of leaving them behind.
+    let wanted: Vec<String> = profile.git.keys().map(|k| normalize_key(k)).collect();
+    for key in config_get_all(&repo.root, MANAGED) {
+        if !wanted.contains(&normalize_key(&key)) {
+            config_unset_all(&repo.root, &key)?;
+        }
+    }
+    config_unset_all(&repo.root, MANAGED)?;
     for (key, value) in &profile.git {
         config_set(&repo.root, key, value)?;
+        config_add(&repo.root, MANAGED, key)?;
     }
     Ok(())
 }
+
+/// Multi-valued local key listing the `[profiles.git]` keys gitenv wrote.
+const MANAGED: &str = "gitenv.managed";
 
 /// The `core.sshCommand` value that makes git offer `key` and nothing else.
 /// The path is single-quoted so spaces survive, and a leading `~` is
@@ -355,6 +368,48 @@ fn config_set(root: &Path, key: &str, value: &str) -> Result<()> {
         bail!("git config --local {key} failed");
     }
     Ok(())
+}
+
+fn config_get_all(root: &Path, key: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--local", "--get-all", "-z", key])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn config_add(root: &Path, key: &str, value: &str) -> Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--local", "--add", key, value])
+        .status()
+        .context("running git config --add")?;
+    if !status.success() {
+        bail!("git config --local --add {key} failed");
+    }
+    Ok(())
+}
+
+fn config_unset_all(root: &Path, key: &str) -> Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["config", "--local", "--unset-all", key])
+        .status()
+        .context("running git config --unset-all")?;
+    match status.code() {
+        Some(0) | Some(5) => Ok(()),
+        _ => bail!("git config --local --unset-all {key} failed"),
+    }
 }
 
 fn config_unset(root: &Path, key: &str) -> Result<()> {
@@ -484,8 +539,43 @@ mod tests {
             Some("ssh -i '/tmp/id_test' -o IdentitiesOnly=yes")
         );
 
+        // Switching keeps a shared extra key and drops one the new profile
+        // does not have; a key the user set by hand is left alone.
+        p.git.insert("pull.rebase".into(), "true".into());
+        apply(&repo, &p).unwrap();
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["config", "--local", "core.editor", "vim"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut other = profile(None);
+        other.git.insert("Pull.Rebase".into(), "false".into());
+        apply(&repo, &other).unwrap();
+        assert!(
+            config_get(
+                &dir,
+                &["--local", "--get", "url.git@github.com:acme/.insteadOf"]
+            )
+            .is_none()
+        );
+        assert_eq!(
+            config_get(&dir, &["--local", "--get", "pull.rebase"]).as_deref(),
+            Some("false")
+        );
+        assert_eq!(config_get_all(&dir, MANAGED), vec!["Pull.Rebase"]);
+        assert_eq!(
+            config_get(&dir, &["--local", "--get", "core.editor"]).as_deref(),
+            Some("vim")
+        );
+
         apply(&repo, &profile(None)).unwrap();
         let repo = discover(&dir).unwrap().unwrap();
+        assert!(config_get(&dir, &["--local", "--get", "pull.rebase"]).is_none());
+        assert!(config_get_all(&dir, MANAGED).is_empty());
         assert!(repo.local.signing_key.is_none());
         assert!(config_get(&dir, &["--local", "--get", "core.sshCommand"]).is_none());
         assert!(repo.local.signing_format.is_none());
