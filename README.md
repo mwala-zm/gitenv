@@ -168,21 +168,28 @@ git would use now), with a count per author. Use `git rebase` with
 `gitenv check` exits 0 when the repo's identity matches a saved profile, 1
 when it does not, and 2 when it could not look (not a repo, config
 unreadable, git missing). It prints nothing on success, so it makes a quiet
-pre-commit hook:
+hook. gitenv installs it as a pre-commit and a pre-push hook for you:
+
+```sh
+gitenv hook install            # this repository
+gitenv hook install --global   # every repository, through core.hooksPath
+gitenv hook remove [--global]  # take them out again
+```
+
+A hook gitenv did not write is never replaced; you are told which line to
+add to it instead. `--global` uses your global `core.hooksPath`, or sets it
+to `~/.githooks`. git skips each repo's own `.git/hooks` once that is set,
+so the global hooks run the repo's own hook after the check, and `remove
+--global` unsets `core.hooksPath` again if gitenv set it. If gitenv is not
+on `PATH` when a hook runs (some GUI clients use a short one), the hook
+warns and lets the commit through rather than blocking every commit.
+
+To write the hook yourself instead:
 
 ```sh
 #!/bin/sh
 # .git/hooks/pre-commit
 exec gitenv check
-```
-
-To guard every repository you have cloned, point git at one hooks directory
-for all of them and put the script there instead:
-
-```sh
-git config --global core.hooksPath ~/.githooks
-mkdir -p ~/.githooks && printf '#!/bin/sh\nexec gitenv check\n' > ~/.githooks/pre-commit
-chmod +x ~/.githooks/pre-commit
 ```
 
 On a mismatch the commit is refused and gitenv prints what git would have

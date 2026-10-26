@@ -4,6 +4,7 @@ mod cmd;
 mod export;
 mod form;
 mod git;
+mod hook;
 mod profile;
 mod rules;
 mod scan;
@@ -99,6 +100,11 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Install or remove `gitenv check` as pre-commit and pre-push hooks
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
+    },
     /// Write profiles and rules as git config, so git picks the identity
     /// by itself
     ///
@@ -122,6 +128,32 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum HookAction {
+    /// Write the hooks; never replaces a hook gitenv did not write
+    ///
+    /// With --global, the hooks go in the global core.hooksPath
+    /// (~/.githooks unless one is set) and cover every repository; each
+    /// repository's own hook still runs after the check.
+    Install {
+        /// For every repository, through core.hooksPath
+        #[arg(long)]
+        global: bool,
+        /// Directory inside the repository
+        #[arg(long, short, default_value = ".")]
+        path: PathBuf,
+    },
+    /// Remove the hooks gitenv wrote
+    Remove {
+        /// The global hooks, unsetting core.hooksPath if gitenv set it
+        #[arg(long)]
+        global: bool,
+        /// Directory inside the repository
+        #[arg(long, short, default_value = ".")]
+        path: PathBuf,
+    },
+}
+
 fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
@@ -139,6 +171,14 @@ fn main() -> Result<ExitCode> {
                 },
             )
         })),
+        Some(Command::Hook { action }) => Ok(match action {
+            HookAction::Install { global, path } => {
+                in_dir(Some(path), |dir| hook::run(hook::install(dir, global)))
+            }
+            HookAction::Remove { global, path } => {
+                in_dir(Some(path), |dir| hook::run(hook::remove(dir, global)))
+            }
+        }),
         Some(Command::Export { install }) => Ok(export::run(install)),
         Some(Command::Completions { shell }) => {
             let mut cmd = Cli::command();
