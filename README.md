@@ -276,7 +276,15 @@ paths = ["~/work/acme/**"]
 `git@github.com:acme/api.git` and `https://github.com/acme/api.git` alike.
 `*` stops at a slash and `**` does not. `paths` are globs matched against
 the repository root; `~` is your home directory and `dir/**` also matches
-`dir` itself. The first profile with a matching rule wins.
+`dir` itself.
+
+When several rules match, the most specific one wins, wherever its profile
+sits in the file: a remote rule beats a path rule, and otherwise the rule
+with the longer text before its first wildcard wins. So a freelancer can
+give `~/projects/**` to a personal profile and
+`~/projects/clients/agency/**` to the agency's, and repos under `agency`
+belong to the agency. Rules that are equally specific fall back to file
+order.
 
 When a rule claims the repo, the TUI marks that profile with `◆`, highlights
 it on start so Enter applies it, and the repository pane says which profile
