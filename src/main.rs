@@ -9,7 +9,7 @@ mod scan;
 mod ui;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -110,40 +110,20 @@ enum Command {
 fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Check { path }) => Ok(match resolve_dir(path) {
-            Ok(dir) => check::run(&dir),
-            Err(err) => {
-                eprintln!("gitenv: {err:#}");
-                ExitCode::from(2)
-            }
-        }),
-        Some(Command::Apply { profile, path }) => Ok(match resolve_dir(Some(path)) {
-            Ok(dir) => cmd::apply(profile.as_deref(), &dir),
-            Err(err) => {
-                eprintln!("gitenv: {err:#}");
-                ExitCode::from(2)
-            }
-        }),
-        Some(Command::Status { short, path }) => Ok(match resolve_dir(path) {
-            Ok(dir) => cmd::status(short, &dir),
-            Err(err) => {
-                eprintln!("gitenv: {err:#}");
-                ExitCode::from(2)
-            }
-        }),
-        Some(Command::Scan { dir, problems, fix }) => Ok(match resolve_dir(dir) {
-            Ok(dir) => scan::run(
-                &dir,
+        Some(Command::Check { path }) => Ok(in_dir(path, check::run)),
+        Some(Command::Apply { profile, path }) => Ok(in_dir(Some(path), |dir| {
+            cmd::apply(profile.as_deref(), dir)
+        })),
+        Some(Command::Status { short, path }) => Ok(in_dir(path, |dir| cmd::status(short, dir))),
+        Some(Command::Scan { dir, problems, fix }) => Ok(in_dir(dir, |dir| {
+            scan::run(
+                dir,
                 &scan::Options {
                     problems_only: problems,
                     fix,
                 },
-            ),
-            Err(err) => {
-                eprintln!("gitenv: {err:#}");
-                ExitCode::from(2)
-            }
-        }),
+            )
+        })),
         Some(Command::Completions { shell }) => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "gitenv", &mut io::stdout());
@@ -156,6 +136,17 @@ fn main() -> Result<ExitCode> {
             let result = run(&mut terminal, &mut app);
             ratatui::restore();
             result.map(|()| ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Run a subcommand on a directory, exiting 2 if it is not one.
+fn in_dir(arg: Option<PathBuf>, run: impl FnOnce(&Path) -> ExitCode) -> ExitCode {
+    match resolve_dir(arg) {
+        Ok(dir) => run(&dir),
+        Err(err) => {
+            eprintln!("gitenv: {err:#}");
+            ExitCode::from(2)
         }
     }
 }
