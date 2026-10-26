@@ -1,6 +1,7 @@
 mod app;
 mod check;
 mod cmd;
+mod export;
 mod form;
 mod git;
 mod profile;
@@ -98,6 +99,20 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Write profiles and rules as git config, so git picks the identity
+    /// by itself
+    ///
+    /// Each profile with rules gets a file with its identity, and
+    /// includes.gitconfig loads them with `includeIf`: path rules as
+    /// `gitdir/i:`, remote rules as `hasconfig:remote.*.url:` (git 2.36+).
+    /// The right identity then applies in a fresh clone before its first
+    /// commit, without gitenv running. Once exported, the TUI rewrites the
+    /// files whenever you edit profiles.
+    Export {
+        /// Also add the file to include.path in your global git config
+        #[arg(long)]
+        install: bool,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// For example: `gitenv completions zsh > ~/.zfunc/_gitenv`.
@@ -124,6 +139,7 @@ fn main() -> Result<ExitCode> {
                 },
             )
         })),
+        Some(Command::Export { install }) => Ok(export::run(install)),
         Some(Command::Completions { shell }) => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "gitenv", &mut io::stdout());

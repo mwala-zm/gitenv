@@ -79,6 +79,7 @@ gitenv status --short    # one token for a shell prompt, e.g. `acme`
 gitenv apply acme        # write a profile into .git/config without the UI
 gitenv apply             # apply whichever profile's rules claim this repo
 gitenv scan ~/work       # every repo under a directory, and its verdict
+gitenv export --install  # let git apply your rules itself, even in new clones
 ```
 
 | Key | Action |
@@ -292,6 +293,31 @@ When a rule claims the repo, the TUI marks that profile with `◆`, highlights
 it on start so Enter applies it, and the repository pane says which profile
 the repo is on and which it should be on. `gitenv check` exits 1 with the
 same explanation, even if the current identity is another saved profile.
+
+### Letting git switch by itself
+
+Rules tell you a repo is on the wrong profile; `gitenv export` makes git
+pick the right one in the first place. It writes each profile that has
+rules to a small git config file and an `includes.gitconfig` that loads
+them with git's own conditional includes:
+
+```sh
+gitenv export --install
+```
+
+Path rules become `includeIf "gitdir/i:..."` and remote rules
+`includeIf "hasconfig:remote.*.url:..."` (git 2.36 or newer), spelled out
+for SSH and HTTPS URLs since git compares them as written. `--install` adds
+one `include.path` line to your global config. From then on a fresh clone
+has the right name, email, signing key and SSH key before its first
+commit, with no hook and without gitenv running. When several rules match,
+the most specific one wins, as it does in gitenv.
+
+The files live in a `gitenv-includes` directory next to the profiles file,
+and the TUI rewrites them whenever you save or delete a profile. Anything
+`gitenv apply` writes to a repo's `.git/config` still takes precedence,
+since local config always wins. One difference from gitenv's own matching:
+git checks every remote, while gitenv prefers `origin` when there is one.
 
 ## Development
 

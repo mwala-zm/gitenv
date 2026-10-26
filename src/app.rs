@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::export;
 use crate::form::Form;
 use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
@@ -201,7 +202,7 @@ impl App {
         self.config
             .save(&self.config_path)
             .map_err(|e| format!("Could not save config: {e}"))?;
-        self.status = Some(format!("Saved profile '{name}'"));
+        self.status = Some(format!("Saved profile '{name}'{}", self.refresh_export()));
         Ok(())
     }
 
@@ -215,9 +216,22 @@ impl App {
             .selected
             .min(self.config.profiles.len().saturating_sub(1));
         self.status = Some(match self.config.save(&self.config_path) {
-            Ok(()) => format!("Deleted profile '{}'", removed.name),
+            Ok(()) => format!(
+                "Deleted profile '{}'{}",
+                removed.name,
+                self.refresh_export()
+            ),
             Err(e) => format!("Could not save config: {e}"),
         });
+    }
+
+    /// Keep `gitenv export`'s files in step; a suffix for the status line.
+    fn refresh_export(&self) -> String {
+        match export::refresh(&self.config, &self.config_path) {
+            Ok(true) => " and updated the git includes".into(),
+            Ok(false) => String::new(),
+            Err(e) => format!(", but could not update the git includes: {e}"),
+        }
     }
 
     fn move_selection(&mut self, delta: isize) {
