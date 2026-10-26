@@ -80,6 +80,7 @@ gitenv apply acme        # write a profile into .git/config without the UI
 gitenv apply             # apply whichever profile's rules claim this repo
 gitenv scan ~/work       # every repo under a directory, and its verdict
 gitenv export --install  # let git apply your rules itself, even in new clones
+gitenv doctor            # check every profile's keys exist and log in
 ```
 
 | Key | Action |
@@ -142,6 +143,28 @@ every repo a rule claims that is on the wrong identity, so after adding a
 rule you can bring all your clones in line at once. The exit code is 1 if
 anything still needs attention. Hidden directories, `node_modules` and
 `target` are skipped, and a repo's subdirectories are not searched.
+
+### Checking the profiles themselves
+
+A repo can carry the right email and still push with the wrong account.
+`gitenv doctor` checks that each profile would work:
+
+```
+acme <ada@acme.example>
+  ok    ssh key /Users/ada/.ssh/id_acme exists
+  ok    gpg has the secret key ABCD1234
+  ok    github.com: Hi ada-acme! You've successfully authenticated, but GitHub does not provide shell access.
+personal <ada@example.com>
+  ok    nothing to check beyond name and email
+```
+
+It reports missing ssh and signing key files, a GPG key missing from your
+keyring, `sign_commits` without a key, two profiles with the same name or
+the same identity, and patterns that are not valid globs. For every host a
+profile's remote rules name, it runs `ssh -T` with only that profile's key
+and shows the account the host greets, so a key registered to the wrong
+account stands out. `--offline` skips that step. It exits 1 if any check
+failed.
 
 ### Shell completions
 

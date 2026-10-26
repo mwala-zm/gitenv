@@ -1,6 +1,7 @@
 mod app;
 mod check;
 mod cmd;
+mod doctor;
 mod export;
 mod form;
 mod git;
@@ -100,6 +101,19 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// Check that each profile would work: keys exist and log in
+    ///
+    /// Looks for missing ssh and signing key files, a GPG key missing from
+    /// the keyring, signing switched on without a key, profiles with the
+    /// same name or identity, and bad rule patterns. Unless --offline, also
+    /// runs `ssh -T` with each profile's ssh key against every host its
+    /// remote rules name, and shows which account the host says it is.
+    /// Exits 1 if anything failed.
+    Doctor {
+        /// Skip logging in to hosts over ssh
+        #[arg(long)]
+        offline: bool,
+    },
     /// Install or remove `gitenv check` as pre-commit and pre-push hooks
     Hook {
         #[command(subcommand)]
@@ -171,6 +185,7 @@ fn main() -> Result<ExitCode> {
                 },
             )
         })),
+        Some(Command::Doctor { offline }) => Ok(doctor::run(offline)),
         Some(Command::Hook { action }) => Ok(match action {
             HookAction::Install { global, path } => {
                 in_dir(Some(path), |dir| hook::run(hook::install(dir, global)))
