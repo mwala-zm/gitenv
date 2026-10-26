@@ -111,7 +111,9 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<Vec<Row>> {
 }
 
 fn inspect(config: &Config, path: &Path, opts: &Options) -> Option<Row> {
-    let repo = git::discover(path).ok().flatten()?;
+    // The walk found the top level already and the table shows no history,
+    // so this costs one `git` process instead of four.
+    let repo = git::open(path.to_path_buf(), 0)?;
     let verdict = check::verdict(config, &repo);
     let mut fixed = None;
     if opts.fix

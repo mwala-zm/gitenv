@@ -133,8 +133,28 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
         return Ok(None);
     }
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-    let effective = read_identity(&root, &[]);
-    Ok(Some(Repo {
+    Ok(open(root, HISTORY_DEPTH))
+}
+
+/// Read the repository whose top level is `root`, looking at the last
+/// `history` commits' authors. `None` if `root` is not a repository.
+pub fn open(root: PathBuf, history: usize) -> Option<Repo> {
+    let entries = config_list(&root, &["--show-scope"]);
+    // Every repository has local config (core.repositoryformatversion at
+    // least), so none means git did not see one here.
+    if !entries.iter().any(|(scope, ..)| scope == "local") {
+        return None;
+    }
+    let all = || entries.iter().map(|(_, k, v)| (k.clone(), v.clone()));
+    let effective = identity_from(all().collect());
+    let local = identity_from(
+        entries
+            .iter()
+            .filter(|(scope, ..)| scope == "local")
+            .map(|(_, k, v)| (k.clone(), v.clone()))
+            .collect(),
+    );
+    Some(Repo {
         remote: effective
             .settings
             .get("remote.origin.url")
@@ -142,10 +162,14 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
             .or_else(|| remote_urls(&effective.settings).first().copied())
             .map(Into::into),
         effective,
-        local: read_identity(&root, &["--local"]),
-        authors: recent_authors(&root, HISTORY_DEPTH),
+        local,
+        authors: if history > 0 {
+            recent_authors(&root, history)
+        } else {
+            Vec::new()
+        },
         root,
-    }))
+    })
 }
 
 /// `remote.<name>.url` values, in remote-name order.
@@ -246,7 +270,15 @@ fn shell_quote(s: &str) -> String {
 
 /// A key set several times keeps its last value, as `git config --get` would.
 fn read_identity(root: &Path, scope: &[&str]) -> Identity {
-    let settings = config_list(root, scope);
+    identity_from(
+        config_list(root, scope)
+            .into_iter()
+            .map(|(_, k, v)| (k, v))
+            .collect(),
+    )
+}
+
+fn identity_from(settings: BTreeMap<String, String>) -> Identity {
     let get = |key: &str| settings.get(key).filter(|v| !v.is_empty()).cloned();
     Identity {
         name: get("user.name"),
@@ -259,30 +291,41 @@ fn read_identity(root: &Path, scope: &[&str]) -> Identity {
     }
 }
 
-fn config_list(root: &Path, scope: &[&str]) -> BTreeMap<String, String> {
+/// `(scope, key, value)` per entry, in the order git reads them. The scope
+/// is empty unless `--show-scope` is among `args`.
+fn config_list(root: &Path, args: &[&str]) -> Vec<(String, String, String)> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
         .arg("config")
-        .args(scope)
+        .args(args)
         .args(["--list", "-z"])
         .output();
-    let mut map = BTreeMap::new();
     let Ok(output) = output else {
-        return map;
+        return Vec::new();
     };
     if !output.status.success() {
-        return map;
+        return Vec::new();
     }
-    // `-z` gives `key\nvalue\0` per entry; a key without `=` has no newline.
-    for entry in String::from_utf8_lossy(&output.stdout).split('\0') {
-        if entry.is_empty() {
-            continue;
-        }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let with_scope = args.contains(&"--show-scope");
+    let mut entries = Vec::new();
+    // `-z` gives `key\nvalue\0` per entry, preceded by `scope\0` with
+    // `--show-scope`; a key without `=` has no newline.
+    while let Some(first) = fields.next() {
+        let (scope, entry) = if with_scope {
+            match fields.next() {
+                Some(entry) => (first, entry),
+                None => break,
+            }
+        } else {
+            ("", first)
+        };
         let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
-        map.insert(key.to_string(), value.to_string());
+        entries.push((scope.to_string(), key.to_string(), value.to_string()));
     }
-    map
+    entries
 }
 
 #[cfg(test)]
