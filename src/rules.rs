@@ -27,6 +27,12 @@ const OPTIONS: MatchOptions = MatchOptions {
 /// Patterns are passed through the same function, so a rule can be written
 /// in whichever form the user copies from their hosting provider.
 fn normalize_remote(url: &str) -> String {
+    remote_host_path(url).to_ascii_lowercase()
+}
+
+/// [`normalize_remote`] without lowercasing, for patterns handed to git,
+/// which compares URLs case-sensitively.
+pub fn remote_host_path(url: &str) -> String {
     let url = url.trim();
     let (has_scheme, mut s) = match url.split_once("://") {
         Some((_, rest)) => (true, rest),
@@ -48,9 +54,7 @@ fn normalize_remote(url: &str) -> String {
     }
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
-    format!("{host}/{path}")
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
+    format!("{host}/{path}").trim_end_matches('/').to_string()
 }
 
 /// A leading `~` is the home directory.
@@ -58,6 +62,23 @@ fn expand_path(pattern: &str) -> String {
     crate::git::expand_tilde(Path::new(pattern))
         .display()
         .to_string()
+}
+
+/// `pattern` with its leading directories resolved through symlinks, when
+/// that changes it. git reports a repository's resolved path, so a rule
+/// written through a symlink would otherwise never match. The longest
+/// leading directory that exists is used, so a rule for a folder not
+/// created yet still sees through a symlinked parent.
+fn resolve_path(pattern: &str) -> Option<String> {
+    let mut end = pattern[..literal_len(pattern)].rfind('/');
+    while let Some(e) = end.filter(|&e| e > 0) {
+        if let Ok(real) = std::fs::canonicalize(&pattern[..e]) {
+            let resolved = format!("{}{}", real.display(), &pattern[e..]);
+            return (resolved != pattern).then_some(resolved);
+        }
+        end = pattern[..e].rfind('/');
+    }
+    None
 }
 
 fn matches(pattern: &str, subject: &str) -> bool {
@@ -92,6 +113,51 @@ impl std::fmt::Display for Reason {
     }
 }
 
+/// One remote or path pattern of one profile.
+#[derive(Debug, Clone)]
+pub struct Rule<'a> {
+    pub profile: &'a Profile,
+    pub reason: Reason,
+    /// Higher is more specific: remote rules first, then longer literal
+    /// prefixes.
+    pub rank: (bool, usize),
+    /// Remote rules reduced to `host/path`, path rules expanded.
+    pub pattern: String,
+    /// A path rule's pattern resolved through symlinks, when different.
+    pub resolved: Option<String>,
+}
+
+/// Every rule in file order.
+pub fn all(config: &Config) -> Vec<Rule<'_>> {
+    config
+        .profiles
+        .iter()
+        .flat_map(|profile| {
+            let remotes = profile.remotes.iter().map(move |rule| {
+                let pattern = normalize_remote(rule);
+                Rule {
+                    profile,
+                    reason: Reason::Remote(rule.clone()),
+                    rank: (true, literal_len(&pattern)),
+                    pattern,
+                    resolved: None,
+                }
+            });
+            let paths = profile.paths.iter().map(move |rule| {
+                let pattern = expand_path(rule);
+                Rule {
+                    profile,
+                    reason: Reason::Path(rule.clone()),
+                    rank: (false, literal_len(&pattern)),
+                    resolved: resolve_path(&pattern),
+                    pattern,
+                }
+            });
+            remotes.chain(paths)
+        })
+        .collect()
+}
+
 pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Reason)> {
     let urls: Vec<String> = repo
         .rule_remotes()
@@ -99,28 +165,21 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
         .map(normalize_remote)
         .collect();
     let root = repo.root.display().to_string();
-    config
-        .profiles
-        .iter()
-        .flat_map(|profile| {
-            let remotes = profile.remotes.iter().filter_map(|rule| {
-                let pattern = normalize_remote(rule);
-                urls.iter()
-                    .any(|url| matches(&pattern, url))
-                    .then(|| ((true, literal_len(&pattern)), Reason::Remote(rule.clone())))
-            });
-            let paths = profile.paths.iter().filter_map(|rule| {
-                let pattern = expand_path(rule);
-                path_matches(&pattern, &root)
-                    .then(|| ((false, literal_len(&pattern)), Reason::Path(rule.clone())))
-            });
-            remotes
-                .chain(paths)
-                .map(move |(rank, why)| (rank, profile, why))
+    all(config)
+        .into_iter()
+        .filter(|rule| match rule.reason {
+            Reason::Remote(_) => urls.iter().any(|url| matches(&rule.pattern, url)),
+            Reason::Path(_) => {
+                path_matches(&rule.pattern, &root)
+                    || rule
+                        .resolved
+                        .as_ref()
+                        .is_some_and(|p| path_matches(p, &root))
+            }
         })
         // `min_by_key` keeps the first of equals, so ties go to file order.
-        .min_by_key(|(rank, ..)| Reverse(*rank))
-        .map(|(_, profile, why)| (profile, why))
+        .min_by_key(|rule| Reverse(rule.rank))
+        .map(|rule| (rule.profile, rule.reason))
 }
 
 pub fn validate(patterns: &[String]) -> Result<(), String> {
@@ -177,6 +236,29 @@ mod tests {
         assert!(path_matches("/work/acme/api/**", root));
         assert!(!path_matches("/work/other/**", root));
         assert!(!path_matches("/work/*", root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_patterns_see_through_symlinks() {
+        let base = std::env::temp_dir().join(format!("gitenv-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("real/api")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("link")).unwrap();
+        let root = std::fs::canonicalize(base.join("real/api")).unwrap();
+        let root = root.display().to_string();
+        let pattern = format!("{}/link/**", base.display());
+        let resolved = resolve_path(&pattern).unwrap();
+        assert!(path_matches(&resolved, &root), "{resolved} vs {root}");
+        let exact = format!("{}/link/api", base.display());
+        assert!(path_matches(&resolve_path(&exact).unwrap(), &root));
+        let missing = format!("{}/link/not-yet/**", base.display());
+        assert!(
+            resolve_path(&missing)
+                .unwrap()
+                .ends_with("/real/not-yet/**")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
