@@ -49,11 +49,15 @@ sudo apt install ./gitenv_<version>_amd64.deb
 sudo dnf install ./gitenv-<version>.x86_64.rpm
 ```
 
+<!-- Arch Linux: uncomment once the release workflow has AUR_SSH_PRIVATE_KEY
+and gitenv-bin is on the AUR.
+
 **Arch Linux**, from the AUR:
 
 ```sh
 yay -S gitenv-bin
 ```
+-->
 
 **Cargo**, from crates.io, or prebuilt with
 [cargo-binstall](https://github.com/cargo-bins/cargo-binstall):
@@ -74,6 +78,7 @@ Run it inside any repository, or point it at one:
 cd ~/work/acme/api && gitenv
 gitenv ~/work/acme/api
 gitenv check             # no UI: just the exit code, for hooks and scripts
+gitenv hook install      # run that check before every commit and push
 gitenv status            # what git would use here, and whether it is right
 gitenv status --short    # one token for a shell prompt, e.g. `acme`
 gitenv apply acme        # write a profile into .git/config without the UI
@@ -248,7 +253,7 @@ work as in a shell.
 |---|---|
 | macOS | `~/Library/Application Support/gitenv/config.toml` |
 | Linux | `~/.config/gitenv/config.toml` |
-| Windows | `%APPDATA%\gitenv\config\config.toml` |
+| Windows (untested, build from source) | `%APPDATA%\gitenv\config\config.toml` |
 
 Set `GITENV_CONFIG=/path/to/config.toml` to use a different file, for
 example one kept in a dotfiles repo.
@@ -375,17 +380,20 @@ cargo clippy       # lints
 
 The code is small and split by responsibility:
 
-- `src/main.rs` sets up the terminal and runs the draw, wait, update loop.
-- `src/app.rs` holds all state and maps key presses to actions.
-- `src/check.rs` is the `check` subcommand used from hooks.
-- `src/form.rs` is the profile editor form and its validation.
+- `src/main.rs` parses the command line, sets up the terminal and runs the
+  draw, wait, update loop.
+- `src/app.rs` holds all TUI state and maps key presses to actions.
 - `src/ui.rs` draws the screen from that state and never mutates it.
-- `src/profile.rs` defines profiles and loads and saves the config file.
+- `src/form.rs` is the profile editor form and its validation.
+- `src/profile.rs` defines profiles and loads and saves the config file,
+  keeping its comments and layout.
 - `src/git.rs` reads and writes git config by shelling out to `git`.
-
-## Roadmap
-
-- Rules that pick a profile automatically from the remote URL or directory.
+- `src/rules.rs` decides which profile a repo should be on.
+- `src/check.rs` turns a repo and the profiles into a verdict, and is the
+  `check` subcommand.
+- `src/cmd.rs` is `apply` and `status`; `src/scan.rs` is `scan`.
+- `src/export.rs`, `src/hook.rs`, `src/doctor.rs` and `src/fix.rs` are
+  `export`, `hook`, `doctor` and `fix-authors`.
 
 ## License
 
