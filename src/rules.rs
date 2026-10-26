@@ -38,8 +38,16 @@ pub fn remote_host_path(url: &str) -> String {
         Some((_, rest)) => (true, rest),
         None => (false, url),
     };
-    // Drop `user@`, but only when the `@` is part of the host, not the path.
-    let host_end = s.find(['/', ':']).unwrap_or(s.len());
+    // Drop `user@` or `user:token@`, but only when the `@` is part of the
+    // host, not the path. With a scheme the host part ends at the first
+    // `/`, so a `:` in it may be a password; scp-like `user@host:path`
+    // cannot carry one.
+    let host_end = if has_scheme {
+        s.find('/')
+    } else {
+        s.find(['/', ':'])
+    }
+    .unwrap_or(s.len());
     if let Some(at) = s[..host_end].rfind('@') {
         s = &s[at + 1..];
     }
@@ -57,11 +65,15 @@ pub fn remote_host_path(url: &str) -> String {
     format!("{host}/{path}").trim_end_matches('/').to_string()
 }
 
-/// A leading `~` is the home directory.
+/// A leading `~` is the home directory; a trailing `/` is dropped.
 fn expand_path(pattern: &str) -> String {
-    crate::git::expand_tilde(Path::new(pattern))
+    let expanded = crate::git::expand_tilde(Path::new(pattern))
         .display()
-        .to_string()
+        .to_string();
+    match expanded.trim_end_matches('/') {
+        "" => expanded,
+        trimmed => trimmed.to_string(),
+    }
 }
 
 /// `pattern` with its leading directories resolved through symlinks, when
@@ -70,6 +82,9 @@ fn expand_path(pattern: &str) -> String {
 /// leading directory that exists is used, so a rule for a folder not
 /// created yet still sees through a symlinked parent.
 fn resolve_path(pattern: &str) -> Option<String> {
+    if !Path::new(pattern).is_absolute() {
+        return None;
+    }
     let mut end = pattern[..literal_len(pattern)].rfind('/');
     while let Some(e) = end.filter(|&e| e > 0) {
         if let Ok(real) = std::fs::canonicalize(&pattern[..e]) {
@@ -187,6 +202,21 @@ pub fn validate(patterns: &[String]) -> Result<(), String> {
         Pattern::new(p).map_err(|e| format!("Bad pattern '{p}': {}", e.msg))?;
     }
     Ok(())
+}
+
+/// Path rules are globs and must be absolute (or start with `~`): repo
+/// roots are, so a relative pattern would never match.
+pub fn validate_paths(patterns: &[String]) -> Result<(), String> {
+    validate(patterns)?;
+    match patterns
+        .iter()
+        .find(|p| !Path::new(&expand_path(p)).is_absolute())
+    {
+        Some(p) => Err(format!(
+            "Path rule '{p}' must start with / or ~/ to match anything"
+        )),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -362,5 +392,24 @@ mod tests {
     fn validate_rejects_bad_globs() {
         assert!(validate(&["github.com/acme/*".into()]).is_ok());
         assert!(validate(&["[unclosed".into()]).is_err());
+    }
+
+    #[test]
+    fn credentials_in_urls_are_not_the_host() {
+        for url in [
+            "https://user:pass@github.com/acme/api.git/",
+            "https://oauth2:glpat-xyz@github.com/acme/api.git",
+            "https://x-access-token:ghs_1@github.com/acme/api",
+        ] {
+            assert_eq!(normalize_remote(url), "github.com/acme/api", "{url}");
+        }
+    }
+
+    #[test]
+    fn trailing_slash_path_rule_and_relative_rules() {
+        assert!(path_matches(&expand_path("/work/trail/"), "/work/trail"));
+        assert!(validate_paths(&["~/work/**".into(), "/srv/*".into()]).is_ok());
+        assert!(validate_paths(&["work/**".into()]).is_err());
+        assert!(resolve_path("p/rel/**").is_none());
     }
 }

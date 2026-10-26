@@ -16,7 +16,7 @@ expression: draw(&app)
 "│                                ││✔ matches profile 'acme'                                    │"
 "│                                ││rule: 'acme' claims this repo (remote matches               │"
 "│                                ││github.com/acme/*)                                          │"
-"│                                ││identity is set in this repo's .git/config                  │"
+"│                                ││identity comes from this repo's config                      │"
 "│                                ││                                                            │"
 "│                                ││Recent commits                                              │"
 "│                                ││last 17 all authored as ada@acme.example                    │"

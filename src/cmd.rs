@@ -120,12 +120,7 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
             show(&repo.effective.ssh_command)
         ));
     }
-    let source = if repo.local.name.is_none() && repo.local.email.is_none() {
-        "global config"
-    } else {
-        "this repo's .git/config"
-    };
-    out.push(format!("source       {source}"));
+    out.push(format!("source       {}", repo.identity_source()));
     let expected = rules::expected(config, repo);
     let reference = match &expected {
         Some((p, _)) => Some(p.email.as_str()),

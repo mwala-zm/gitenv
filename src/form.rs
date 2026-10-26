@@ -203,7 +203,7 @@ impl Form {
         let remotes = list(&remotes);
         let paths = list(&paths);
         rules::validate(&remotes)?;
-        rules::validate(&paths)?;
+        rules::validate_paths(&paths)?;
         let signing_format = match optional(signing_format) {
             Some(s) => Some(
                 SigningFormat::parse(&s)

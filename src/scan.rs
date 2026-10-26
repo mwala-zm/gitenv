@@ -72,19 +72,22 @@ impl Row {
         }
     }
 
+    /// `personal -> acme` for a wrong or just fixed repo, else the profile.
     pub fn profile_column(&self) -> String {
-        match &self.fixed {
-            Some(name) => format!("{} -> {name}", short_status(&self.verdict)),
-            None => short_status(&self.verdict),
-        }
+        short_status(&self.verdict)
     }
 }
 
-/// Repos are visited on a few threads because each costs several `git` processes.
-pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<Vec<Row>> {
-    let paths = find_repos(root);
+/// Repos are visited on a few threads. Returns the rows and a warning per
+/// repository that could not be read or fixed.
+pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<(Vec<Row>, Vec<String>)> {
+    // git reports resolved paths, and path rules expect absolute ones, so
+    // `scan .` and a symlinked folder must be resolved before matching.
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let paths = find_repos(&root);
     let next = AtomicUsize::new(0);
     let rows = Mutex::new(Vec::with_capacity(paths.len()));
+    let warnings = Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -97,8 +100,9 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<Vec<Row>> {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(path) = paths.get(i) else { break };
-                    if let Some(row) = inspect(config, path, opts) {
-                        rows.lock().unwrap().push(row);
+                    match inspect(config, path, opts) {
+                        Ok(row) => rows.lock().unwrap().push(row),
+                        Err(warning) => warnings.lock().unwrap().push(warning),
                     }
                 }
             });
@@ -107,23 +111,41 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<Vec<Row>> {
 
     let mut rows = rows.into_inner().unwrap();
     rows.sort_by(|a, b| a.repo.root.cmp(&b.repo.root));
-    Ok(rows)
+    let mut warnings = warnings.into_inner().unwrap();
+    warnings.sort();
+    Ok((rows, warnings))
 }
 
-fn inspect(config: &Config, path: &Path, opts: &Options) -> Option<Row> {
+/// A row, or a warning when git cannot read the repository. A fix that
+/// does not take is reported on stderr and the row stays `wrong`.
+fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> {
     // The walk found the top level already and the table shows no history,
     // so this costs one `git` process instead of four.
-    let repo = git::open(path.to_path_buf(), 0)?;
+    let Some(repo) = git::open(path.to_path_buf(), 0) else {
+        return Err(format!("skipped {}: git cannot read it", tildify(path)));
+    };
     let verdict = check::verdict(config, &repo);
     let mut fixed = None;
     if opts.fix
         && let Verdict::WrongProfile { .. } = &verdict
         && let Some((profile, _)) = rules::expected(config, &repo)
-        && git::apply(&repo, profile).is_ok()
     {
-        fixed = Some(profile.name.clone());
+        if let Err(err) = git::apply(&repo, profile) {
+            eprintln!("gitenv: could not fix {}: {err:#}", tildify(path));
+        } else if git::open(path.to_path_buf(), 0)
+            .is_some_and(|fresh| check::verdict(config, &fresh).is_ok())
+        {
+            fixed = Some(profile.name.clone());
+        } else {
+            // Worktree config or the environment still overrides it.
+            eprintln!(
+                "gitenv: applied '{}' to {} but git still uses another identity there",
+                profile.name,
+                tildify(path)
+            );
+        }
     }
-    Some(Row {
+    Ok(Row {
         repo,
         verdict,
         fixed,
@@ -191,7 +213,10 @@ pub fn run(root: &Path, opts: &Options) -> ExitCode {
         }
     };
     match scan(&config, root, opts) {
-        Ok(rows) => {
+        Ok((rows, warnings)) => {
+            for warning in &warnings {
+                eprintln!("gitenv: {warning}");
+            }
             println!("{}", render(&rows, opts));
             if rows.iter().all(Row::is_ok) {
                 ExitCode::SUCCESS
@@ -275,7 +300,7 @@ mod tests {
             problems_only: false,
             fix: false,
         };
-        let rows = scan(&config, &base, &opts).unwrap();
+        let (rows, _) = scan(&config, &base, &opts).unwrap();
         assert_eq!(rows.len(), 2);
         let text = render(&rows, &opts);
         assert!(text.contains("ok     personal"), "{text}");
@@ -294,13 +319,13 @@ mod tests {
             problems_only: false,
             fix: true,
         };
-        let rows = scan(&config, &base, &fix).unwrap();
+        let (rows, _) = scan(&config, &base, &fix).unwrap();
         let text = render(&rows, &fix);
         assert!(text.contains("fixed  personal -> acme"), "{text}");
         assert!(text.contains("(1 just fixed)"), "{text}");
         assert!(rows.iter().all(Row::is_ok));
 
-        let rows = scan(&config, &base, &opts).unwrap();
+        let (rows, _) = scan(&config, &base, &opts).unwrap();
         assert!(rows.iter().all(|r| r.verdict.is_ok()));
 
         std::fs::remove_dir_all(&base).unwrap();

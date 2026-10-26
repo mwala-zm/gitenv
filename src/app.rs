@@ -255,7 +255,7 @@ impl App {
             problems_only: false,
             fix: false,
         };
-        scan::scan(&self.config, root, &opts)
+        scan::scan(&self.config, root, &opts).map(|(rows, _)| rows)
     }
 
     fn open_scan(&mut self) {

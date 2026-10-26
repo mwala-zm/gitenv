@@ -51,7 +51,12 @@ pub fn git_bool(s: &str) -> Option<bool> {
 impl Identity {
     pub fn matches(&self, profile: &Profile) -> bool {
         let name_ok = self.name.as_deref() == Some(profile.user_name.as_str());
-        let email_ok = self.email.as_deref() == Some(profile.email.as_str());
+        // Hosts treat email addresses case-insensitively, and so does git
+        // when it maps authors.
+        let email_ok = self
+            .email
+            .as_deref()
+            .is_some_and(|e| e.eq_ignore_ascii_case(&profile.email));
         let key_ok = match &profile.signing_key {
             Some(key) => self.signing_key.as_deref() == Some(key.as_str()),
             None => true,
@@ -97,6 +102,19 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// Where the effective name and email come from, for display.
+    pub fn identity_source(&self) -> &'static str {
+        if author_env("GIT_AUTHOR_NAME").is_some() || author_env("GIT_AUTHOR_EMAIL").is_some() {
+            "the GIT_AUTHOR_* environment variables"
+        } else if self.local.name.is_some() || self.local.email.is_some() {
+            "this repo's config"
+        } else if self.effective.email.is_none() && author_env("EMAIL").is_some() {
+            "the EMAIL environment variable"
+        } else {
+            "global config"
+        }
+    }
+
     /// The remote URLs rules are matched against: `origin` when there is
     /// one, else every remote, so a clone whose only remote is `upstream`
     /// is still claimed.
@@ -139,18 +157,30 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
 /// Read the repository whose top level is `root`, looking at the last
 /// `history` commits' authors. `None` if `root` is not a repository.
 pub fn open(root: PathBuf, history: usize) -> Option<Repo> {
-    let entries = config_list(&root, &["--show-scope"]);
+    let entries = rewrite_remote_urls(config_list(&root, &["--show-scope"]));
     // Every repository has local config (core.repositoryformatversion at
-    // least), so none means git did not see one here.
-    if !entries.iter().any(|(scope, ..)| scope == "local") {
+    // least); without any, ask git, since the file may just be empty.
+    if !entries.iter().any(|(scope, ..)| scope == "local") && !is_repo(&root) {
         return None;
     }
+    // Worktree-scoped config belongs to this checkout as much as local.
+    let own = |scope: &str| scope == "local" || scope == "worktree";
     let all = || entries.iter().map(|(_, k, v)| (k.clone(), v.clone()));
-    let effective = identity_from(all().collect());
+    let mut effective = identity_from(all().collect());
+    // git lets these override config for the commits it makes, and sets
+    // the author ones for hooks, so a hook sees the real author.
+    if let Some(name) = author_env("GIT_AUTHOR_NAME") {
+        effective.name = Some(name);
+    }
+    if let Some(email) = author_env("GIT_AUTHOR_EMAIL") {
+        effective.email = Some(email);
+    } else if effective.email.is_none() {
+        effective.email = author_env("EMAIL");
+    }
     let local = identity_from(
         entries
             .iter()
-            .filter(|(scope, ..)| scope == "local")
+            .filter(|(scope, ..)| own(scope))
             .map(|(_, k, v)| (k.clone(), v.clone()))
             .collect(),
     );
@@ -170,6 +200,51 @@ pub fn open(root: PathBuf, history: usize) -> Option<Repo> {
         },
         root,
     })
+}
+
+fn author_env(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|v| !v.trim().is_empty())
+}
+
+fn is_repo(root: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--git-dir"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Apply `url.<base>.insteadOf` to remote URLs the way git does: the
+/// longest matching prefix is replaced by its base.
+fn rewrite_remote_urls(entries: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
+    let rewrites: Vec<(String, String)> = entries
+        .iter()
+        .filter_map(|(_, k, v)| {
+            let base = k.strip_prefix("url.")?.strip_suffix(".insteadof")?;
+            Some((base.to_string(), v.clone()))
+        })
+        .collect();
+    if rewrites.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .map(|(scope, key, value)| {
+            if !(key.starts_with("remote.") && key.ends_with(".url")) {
+                return (scope, key, value);
+            }
+            let best = rewrites
+                .iter()
+                .filter(|(_, prefix)| value.starts_with(prefix.as_str()))
+                .max_by_key(|(_, prefix)| prefix.len());
+            let value = match best {
+                Some((base, prefix)) => format!("{base}{}", &value[prefix.len()..]),
+                None => value,
+            };
+            (scope, key, value)
+        })
+        .collect()
 }
 
 /// `remote.<name>.url` values, in remote-name order.
@@ -740,5 +815,58 @@ mod tests {
             repo.rule_remotes(),
             vec!["git@github.com:ada/fork.git", "git@github.com:acme/api.git"]
         );
+    }
+
+    #[test]
+    fn insteadof_rewrites_remote_urls() {
+        let e = |s: &str, k: &str, v: &str| (s.to_string(), k.to_string(), v.to_string());
+        let out = rewrite_remote_urls(vec![
+            e("global", "url.git@github.com:.insteadof", "gh:"),
+            e("global", "url.git@github.com:acme/.insteadof", "gh:acme/"),
+            e("local", "remote.origin.url", "gh:acme/api"),
+            e("local", "remote.fork.url", "gh:ada/api"),
+            e("local", "remote.other.url", "https://example.com/x"),
+        ]);
+        assert_eq!(out[2].2, "git@github.com:acme/api");
+        assert_eq!(out[3].2, "git@github.com:ada/api");
+        assert_eq!(out[4].2, "https://example.com/x");
+    }
+
+    #[test]
+    fn email_case_does_not_matter() {
+        let id = Identity {
+            name: Some("Ada".into()),
+            email: Some("ADA@Example.com".into()),
+            ..Default::default()
+        };
+        assert!(id.matches(&profile(None)));
+    }
+
+    #[test]
+    fn worktree_config_counts_and_empty_config_is_still_a_repo() {
+        let dir = std::env::temp_dir().join(format!("gitenv-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["init", "-q"]);
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        git(&["config", "--worktree", "user.email", "wt@example.com"]);
+        let repo = discover(&dir).unwrap().unwrap();
+        assert_eq!(repo.local.email.as_deref(), Some("wt@example.com"));
+
+        std::fs::write(dir.join(".git/config"), "").unwrap();
+        assert!(open(dir.clone(), 0).is_some());
+        assert!(open(std::env::temp_dir(), 0).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

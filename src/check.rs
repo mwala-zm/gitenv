@@ -38,9 +38,10 @@ impl Verdict {
 
 pub fn verdict(config: &Config, repo: &Repo) -> Verdict {
     let actual = config.matching(&repo.effective);
-    if let Some((expected, reason)) = rules::expected(config, repo)
-        && actual != Some(expected)
-    {
+    if let Some((expected, reason)) = rules::expected(config, repo) {
+        if repo.effective.matches(expected) {
+            return Verdict::Match(expected.name.clone());
+        }
         return Verdict::WrongProfile {
             root: repo.root.clone(),
             expected: expected.name.clone(),
@@ -256,5 +257,32 @@ mod tests {
         let v = verdict(&Config::default(), &repo(identity("ada@acme.example")));
         assert!(!v.is_ok());
         assert!(v.to_string().contains("no profiles saved"));
+    }
+
+    #[test]
+    fn rule_profile_with_more_settings_than_a_plain_one_is_satisfied() {
+        let plain = Profile {
+            name: "personal".into(),
+            user_name: "Ada".into(),
+            email: "ada@example.com".into(),
+            ..Default::default()
+        };
+        let signed = Profile {
+            name: "oss-signed".into(),
+            signing_key: Some("ABCDEF".into()),
+            remotes: vec!["github.com/ada/*".into()],
+            ..plain.clone()
+        };
+        let config = Config {
+            profiles: vec![plain, signed],
+        };
+        let mut id = identity("ada@example.com");
+        id.signing_key = Some("ABCDEF".into());
+        let mut r = repo(id);
+        r.remote = Some("git@github.com:ada/sig.git".into());
+        assert_eq!(verdict(&config, &r), Verdict::Match("oss-signed".into()));
+        // Without the rule, the profile that pins more still wins.
+        r.remote = None;
+        assert_eq!(verdict(&config, &r), Verdict::Match("oss-signed".into()));
     }
 }

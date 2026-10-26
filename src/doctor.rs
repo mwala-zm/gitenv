@@ -70,10 +70,9 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
         }
     }
     for p in profiles {
-        for patterns in [&p.remotes, &p.paths] {
-            if let Err(e) = rules::validate(patterns) {
-                out.push(fail(format!("'{}': {e}", p.name)));
-            }
+        let checks = [rules::validate(&p.remotes), rules::validate_paths(&p.paths)];
+        for e in checks.into_iter().filter_map(Result::err) {
+            out.push(fail(format!("'{}': {e}", p.name)));
         }
     }
     out

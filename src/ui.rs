@@ -347,20 +347,21 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
 
     let active = app.active_profile();
     let expected = app.expected_profile();
-    let verdict = match (&expected, active) {
-        (Some((want, _)), Some(have)) if *want != have => Line::from(vec![
+    let expected_profile = expected.as_ref().map(|(p, _)| *p);
+    let verdict = match (expected_profile, active) {
+        (Some(want), Some(have)) if !repo.effective.matches(want) => Line::from(vec![
             "✘ ".red(),
             format!("on profile '{}', should be '{}'", have.name, want.name)
                 .red()
                 .bold(),
         ]),
-        (Some((want, _)), None) => Line::from(vec![
+        (Some(want), _) if !repo.effective.matches(want) => Line::from(vec![
             "✘ ".red(),
             format!("matches no profile, should be '{}'", want.name)
                 .red()
                 .bold(),
         ]),
-        (_, Some(p)) => Line::from(vec![
+        (Some(p), _) | (None, Some(p)) => Line::from(vec![
             "✔ ".green(),
             format!("matches profile '{}'", p.name).green(),
         ]),
@@ -376,11 +377,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         None => Line::from("no profile rule claims this repo".dim()),
     };
 
-    let local_note = if repo.local.name.is_none() && repo.local.email.is_none() {
-        Line::from("identity comes from global config".dim())
-    } else {
-        Line::from("identity is set in this repo's .git/config".dim())
-    };
+    let local_note = Line::from(format!("identity comes from {}", repo.identity_source()).dim());
 
     let mut lines = vec![
         field("root", &Some(repo.root.display().to_string())),

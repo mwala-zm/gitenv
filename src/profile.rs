@@ -106,6 +106,17 @@ pub struct Config {
     pub profiles: Vec<Profile>,
 }
 
+impl Profile {
+    /// How many settings beyond name and email the profile fixes.
+    fn pinned(&self) -> usize {
+        usize::from(self.signing_key.is_some())
+            + usize::from(self.ssh_key.is_some())
+            + usize::from(self.signing_format.is_some())
+            + usize::from(self.sign_commits.is_some())
+            + self.git.len()
+    }
+}
+
 impl Config {
     /// `~/Library/Application Support/gitenv/config.toml` on macOS,
     /// `~/.config/gitenv/config.toml` on Linux, unless `GITENV_CONFIG` is set.
@@ -158,8 +169,16 @@ impl Config {
         Ok(())
     }
 
+    /// The profile the identity is on. When several match, the one that
+    /// pins the most settings wins, so a repo set up with a signing profile
+    /// is not reported as a plainer profile with the same name and email;
+    /// ties go to file order.
     pub fn matching(&self, identity: &crate::git::Identity) -> Option<&Profile> {
-        self.profiles.iter().find(|p| identity.matches(p))
+        self.profiles
+            .iter()
+            .rev()
+            .filter(|p| identity.matches(p))
+            .max_by_key(|p| p.pinned())
     }
 }
 
