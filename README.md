@@ -81,6 +81,7 @@ gitenv apply             # apply whichever profile's rules claim this repo
 gitenv scan ~/work       # every repo under a directory, and its verdict
 gitenv export --install  # let git apply your rules itself, even in new clones
 gitenv doctor            # check every profile's keys exist and log in
+gitenv fix-authors       # re-author unpushed commits made as someone else
 ```
 
 | Key | Action |
@@ -183,8 +184,16 @@ Switching identity only protects the next commit. The repository pane and
 `gitenv status` also look at the authors of the last 20 commits on the
 current branch and warn when some were made with a different email than
 the repo should be using (the profile a rule claims it for, else the one
-git would use now), with a count per author. Use `git rebase` with
-`--reset-author` or `git filter-repo` to repair those before pushing.
+git would use now), with a count per author.
+
+`gitenv fix-authors` repairs the ones you have not pushed yet. It lists the
+commits on the current branch that no remote branch has and whose author is
+not that profile, asks, applies the profile, and replays them with the
+author corrected and the original author date kept. Commits already on a
+remote are never rewritten, so nobody else's clone breaks; for those, use
+`git filter-repo` and coordinate a force push. It refuses with uncommitted
+changes or a merge among the unpushed commits, `--yes` skips the question,
+and the previous commits stay reachable through `git reflog`.
 
 ## Hooks
 

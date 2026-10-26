@@ -3,6 +3,7 @@ mod check;
 mod cmd;
 mod doctor;
 mod export;
+mod fix;
 mod form;
 mod git;
 mod hook;
@@ -114,6 +115,21 @@ enum Command {
         #[arg(long)]
         offline: bool,
     },
+    /// Re-author unpushed commits made with the wrong identity
+    ///
+    /// Finds commits on HEAD that no remote branch has and whose author is
+    /// not the profile this repo should use (the one a rule claims it for,
+    /// else the one it is on), applies that profile, and replays the
+    /// unpushed commits with the author fixed and the author date kept.
+    /// Pushed commits are never rewritten. Asks first unless --yes.
+    FixAuthors {
+        /// Rewrite without asking
+        #[arg(long, short)]
+        yes: bool,
+        /// Directory inside the repository
+        #[arg(long, short, default_value = ".")]
+        path: PathBuf,
+    },
     /// Install or remove `gitenv check` as pre-commit and pre-push hooks
     Hook {
         #[command(subcommand)]
@@ -186,6 +202,7 @@ fn main() -> Result<ExitCode> {
             )
         })),
         Some(Command::Doctor { offline }) => Ok(doctor::run(offline)),
+        Some(Command::FixAuthors { yes, path }) => Ok(in_dir(Some(path), |dir| fix::run(dir, yes))),
         Some(Command::Hook { action }) => Ok(match action {
             HookAction::Install { global, path } => {
                 in_dir(Some(path), |dir| hook::run(hook::install(dir, global)))

@@ -277,7 +277,7 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 /// Quote for POSIX `sh`, which is what git runs `core.sshCommand` through.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
