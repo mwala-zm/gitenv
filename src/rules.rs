@@ -93,7 +93,11 @@ impl std::fmt::Display for Reason {
 }
 
 pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Reason)> {
-    let url = repo.remote.as_deref().map(normalize_remote);
+    let urls: Vec<String> = repo
+        .rule_remotes()
+        .into_iter()
+        .map(normalize_remote)
+        .collect();
     let root = repo.root.display().to_string();
     config
         .profiles
@@ -101,7 +105,8 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
         .flat_map(|profile| {
             let remotes = profile.remotes.iter().filter_map(|rule| {
                 let pattern = normalize_remote(rule);
-                matches(&pattern, url.as_deref()?)
+                urls.iter()
+                    .any(|url| matches(&pattern, url))
                     .then(|| ((true, literal_len(&pattern)), Reason::Remote(rule.clone())))
             });
             let paths = profile.paths.iter().filter_map(|rule| {

@@ -97,6 +97,17 @@ pub struct Repo {
 }
 
 impl Repo {
+    /// The remote URLs rules are matched against: `origin` when there is
+    /// one, else every remote, so a clone whose only remote is `upstream`
+    /// is still claimed.
+    pub fn rule_remotes(&self) -> Vec<&str> {
+        let all = remote_urls(&self.effective.settings);
+        if all.is_empty() || self.effective.settings.contains_key("remote.origin.url") {
+            return self.remote.as_deref().into_iter().collect();
+        }
+        all
+    }
+
     pub fn commits_inspected(&self) -> usize {
         self.authors.iter().map(|a| a.commits).sum()
     }
@@ -124,12 +135,26 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
     let root = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
     let effective = read_identity(&root, &[]);
     Ok(Some(Repo {
-        remote: effective.settings.get("remote.origin.url").cloned(),
+        remote: effective
+            .settings
+            .get("remote.origin.url")
+            .map(String::as_str)
+            .or_else(|| remote_urls(&effective.settings).first().copied())
+            .map(Into::into),
         effective,
         local: read_identity(&root, &["--local"]),
         authors: recent_authors(&root, HISTORY_DEPTH),
         root,
     }))
+}
+
+/// `remote.<name>.url` values, in remote-name order.
+fn remote_urls(settings: &BTreeMap<String, String>) -> Vec<&str> {
+    settings
+        .iter()
+        .filter(|(k, _)| k.starts_with("remote.") && k.ends_with(".url"))
+        .map(|(_, v)| v.as_str())
+        .collect()
 }
 
 pub fn recent_authors(root: &Path, depth: usize) -> Vec<Author> {
@@ -549,5 +574,38 @@ mod tests {
             ..Default::default()
         };
         assert!(!id.matches(&profile(None)));
+    }
+
+    #[test]
+    fn rules_see_every_remote_when_there_is_no_origin() {
+        let mut repo = Repo {
+            root: "/r".into(),
+            remote: Some("git@github.com:ada/api.git".into()),
+            effective: Identity::default(),
+            local: Identity::default(),
+            authors: Vec::new(),
+        };
+        assert_eq!(repo.rule_remotes(), vec!["git@github.com:ada/api.git"]);
+
+        let settings = &mut repo.effective.settings;
+        settings.insert(
+            "remote.origin.url".into(),
+            "git@github.com:ada/api.git".into(),
+        );
+        settings.insert(
+            "remote.upstream.url".into(),
+            "git@github.com:acme/api.git".into(),
+        );
+        assert_eq!(repo.rule_remotes(), vec!["git@github.com:ada/api.git"]);
+
+        repo.effective.settings.remove("remote.origin.url");
+        repo.effective.settings.insert(
+            "remote.my.fork.url".into(),
+            "git@github.com:ada/fork.git".into(),
+        );
+        assert_eq!(
+            repo.rule_remotes(),
+            vec!["git@github.com:ada/fork.git", "git@github.com:acme/api.git"]
+        );
     }
 }
