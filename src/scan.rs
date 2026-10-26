@@ -51,7 +51,7 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Row {
     pub repo: Repo,
     pub verdict: Verdict,
@@ -63,7 +63,7 @@ impl Row {
         self.verdict.is_ok() || self.fixed.is_some()
     }
 
-    fn status_word(&self) -> &'static str {
+    pub fn status_word(&self) -> &'static str {
         match (&self.fixed, &self.verdict) {
             (Some(_), _) => "fixed",
             (None, Verdict::Match(_)) => "ok",
@@ -72,7 +72,7 @@ impl Row {
         }
     }
 
-    fn profile_column(&self) -> String {
+    pub fn profile_column(&self) -> String {
         match &self.fixed {
             Some(name) => format!("{} -> {name}", short_status(&self.verdict)),
             None => short_status(&self.verdict),
@@ -173,7 +173,7 @@ pub fn render(rows: &[Row], opts: &Options) -> String {
     out.join("\n")
 }
 
-fn tildify(path: &Path) -> String {
+pub fn tildify(path: &Path) -> String {
     if let Some(dirs) = directories::UserDirs::new()
         && let Ok(rest) = path.strip_prefix(dirs.home_dir())
     {

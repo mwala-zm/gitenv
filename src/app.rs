@@ -8,6 +8,7 @@ use crate::form::Form;
 use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
 use crate::rules::{self, Reason};
+use crate::scan::{self, Row};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -15,6 +16,15 @@ pub enum Mode {
     Help,
     Edit(Box<Form>),
     ConfirmDelete,
+    Scan(Box<ScanView>),
+}
+
+/// Every repository under a directory, as `gitenv scan` lists them.
+#[derive(Debug, Clone)]
+pub struct ScanView {
+    pub root: PathBuf,
+    pub rows: Vec<Row>,
+    pub selected: usize,
 }
 
 pub struct App {
@@ -25,6 +35,8 @@ pub struct App {
     pub status: Option<String>,
     pub mode: Mode,
     pub should_quit: bool,
+    /// Where `s` looks for repositories.
+    pub scan_root: PathBuf,
 }
 
 impl App {
@@ -49,6 +61,11 @@ impl App {
         }
 
         let repo = git::discover(dir)?;
+        let scan_root = match &repo {
+            Some(repo) => repo.root.parent().unwrap_or(&repo.root).to_path_buf(),
+            None => dir.to_path_buf(),
+        };
+        let started_outside = repo.is_none();
 
         let mut app = Self {
             config,
@@ -58,8 +75,14 @@ impl App {
             status: None,
             mode: Mode::Normal,
             should_quit: false,
+            scan_root,
         };
         app.select_active();
+        // `gitenv ~/work` on a folder of clones opens on the list of them.
+        if started_outside {
+            app.open_scan();
+            app.status = None;
+        }
         Ok(app)
     }
 
@@ -92,6 +115,7 @@ impl App {
             Mode::Help => self.mode = Mode::Normal,
             Mode::Edit(_) => self.handle_edit_key(key),
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
+            Mode::Scan(_) => self.handle_scan_key(key),
         }
     }
 
@@ -103,6 +127,7 @@ impl App {
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.move_selection(-1),
             (KeyCode::Enter, _) => self.apply_selected(),
             (KeyCode::Char('r'), _) => self.refresh(),
+            (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
             (KeyCode::Char('e'), _) => {
@@ -225,6 +250,106 @@ impl App {
         });
     }
 
+    fn scan_rows(&self, root: &Path) -> Result<Vec<Row>> {
+        let opts = scan::Options {
+            problems_only: false,
+            fix: false,
+        };
+        scan::scan(&self.config, root, &opts)
+    }
+
+    fn open_scan(&mut self) {
+        let root = self.scan_root.clone();
+        match self.scan_rows(&root) {
+            Ok(rows) if rows.is_empty() => {
+                self.status = Some(format!("No repositories under {}", scan::tildify(&root)));
+            }
+            Ok(rows) => {
+                self.mode = Mode::Scan(Box::new(ScanView {
+                    root,
+                    rows,
+                    selected: 0,
+                }))
+            }
+            Err(err) => self.status = Some(format!("Could not scan: {err}")),
+        }
+    }
+
+    fn rescan(&mut self) {
+        let Mode::Scan(view) = &self.mode else {
+            return;
+        };
+        let root = view.root.clone();
+        let rows = self.scan_rows(&root);
+        if let Mode::Scan(view) = &mut self.mode {
+            match rows {
+                Ok(rows) => {
+                    view.selected = view.selected.min(rows.len().saturating_sub(1));
+                    view.rows = rows;
+                }
+                Err(err) => self.status = Some(format!("Could not scan: {err}")),
+            }
+        }
+    }
+
+    fn handle_scan_key(&mut self, key: KeyEvent) {
+        let Mode::Scan(view) = &mut self.mode else {
+            return;
+        };
+        let len = view.rows.len().max(1);
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
+                self.should_quit = true
+            }
+            (KeyCode::Esc, _) | (KeyCode::Char('s'), _) => self.mode = Mode::Normal,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                view.selected = (view.selected + 1) % len
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                view.selected = (view.selected + len - 1) % len
+            }
+            (KeyCode::Char('r'), _) => self.rescan(),
+            (KeyCode::Char('o'), _) => {
+                let Some(row) = view.rows.get(view.selected) else {
+                    return;
+                };
+                let root = row.repo.root.clone();
+                match git::discover(&root) {
+                    Ok(Some(repo)) => {
+                        self.repo = Some(repo);
+                        self.mode = Mode::Normal;
+                        self.select_active();
+                        self.status = Some(format!("Opened {}", scan::tildify(&root)));
+                    }
+                    _ => self.status = Some(format!("Could not read {}", root.display())),
+                }
+            }
+            (KeyCode::Enter, _) => {
+                let Some(row) = view.rows.get(view.selected) else {
+                    return;
+                };
+                let repo = row.repo.clone();
+                self.status = Some(match rules::expected(&self.config, &repo) {
+                    None => "No rule claims this repo; press o to open it and pick a profile"
+                        .to_string(),
+                    Some((profile, _)) => match git::apply(&repo, profile) {
+                        Ok(()) => format!(
+                            "Applied profile '{}' to {}",
+                            profile.name,
+                            scan::tildify(&repo.root)
+                        ),
+                        Err(err) => format!("Failed to apply: {err}"),
+                    },
+                });
+                self.rescan();
+                if self.repo.as_ref().is_some_and(|r| r.root == repo.root) {
+                    self.refresh();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Keep `gitenv export`'s files in step; a suffix for the status line.
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
@@ -299,6 +424,7 @@ mod tests {
             status: None,
             mode: Mode::Normal,
             should_quit: false,
+            scan_root: std::env::temp_dir(),
         }
     }
 
@@ -397,5 +523,70 @@ mod tests {
             panic!("should still be editing");
         };
         assert_eq!(form.values[0], "bC");
+    }
+
+    #[test]
+    fn scan_view_applies_the_claimed_profile_and_opens_repos() {
+        let base = std::env::temp_dir().join(format!("gitenv-app-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let git = |dir: &Path, args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        for (name, remote) in [
+            ("api", "git@github.com:acme/api.git"),
+            ("toy", "git@github.com:ada/toy.git"),
+        ] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            git(&dir, &["init", "-q"]);
+            git(&dir, &["remote", "add", "origin", remote]);
+            git(&dir, &["config", "--local", "user.name", "Ada"]);
+            git(
+                &dir,
+                &["config", "--local", "user.email", "ada@example.com"],
+            );
+        }
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        acme.remotes = vec!["github.com/acme/*".into()];
+        let mut app = app_with("scan", vec![profile("personal"), acme]);
+        app.scan_root = base.clone();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        let Mode::Scan(view) = &app.mode else {
+            panic!("s should open the scan view: {:?}", app.status);
+        };
+        assert_eq!(view.rows.len(), 2);
+        assert_eq!(view.rows[0].status_word(), "wrong");
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Mode::Scan(view) = &app.mode else {
+            panic!("still scanning");
+        };
+        assert_eq!(view.rows[0].status_word(), "ok", "{:?}", app.status);
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Applied profile 'acme'")
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.status.as_deref().unwrap().starts_with("No rule claims"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.repo.as_ref().unwrap().root.file_name().unwrap(), "toy");
+        assert_eq!(app.active_profile().unwrap().name, "personal");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

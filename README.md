@@ -92,6 +92,7 @@ gitenv fix-authors       # re-author unpushed commits made as someone else
 | `n` | create a new profile |
 | `d` | delete the selected profile (asks first) |
 | `r` | re-read the repo |
+| `s` | list every repo next to this one (see below) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 
@@ -138,6 +139,12 @@ none   ?                ~/play/thing
 
 3 repositories, 1 on the right profile, 2 to look at
 ```
+
+The same list is in the TUI: press `s` to scan the folder that holds the
+current repo, or start gitenv on a folder that is not itself a repo
+(`gitenv ~/work`) to open on it. There, `Enter` applies the profile a rule
+claims for the highlighted repo, `o` opens it in the main view, `r`
+rescans and `Esc` goes back.
 
 `--problems` hides the `ok` rows. `--fix` applies the expected profile to
 every repo a rule claims that is on the wrong identity, so after adding a

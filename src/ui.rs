@@ -4,9 +4,10 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Mode};
+use crate::app::{App, Mode, ScanView};
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
+use crate::scan;
 
 pub fn render(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
@@ -16,10 +17,16 @@ pub fn render(frame: &mut Frame, app: &App) {
     ])
     .areas(frame.area());
 
+    render_header(frame, header);
+    if let Mode::Scan(view) = &app.mode {
+        render_scan(frame, body, view);
+        render_footer(frame, footer, app);
+        return;
+    }
+
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(body);
 
-    render_header(frame, header);
     render_profiles(frame, left, app);
     render_repo(frame, right, app);
     render_footer(frame, footer, app);
@@ -29,7 +36,59 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::Help => render_help(frame),
         Mode::Edit(form) => render_form(frame, form),
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
+        Mode::Scan(_) => {}
     }
+}
+
+fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
+    let ok = view.rows.iter().filter(|r| r.is_ok()).count();
+    let title = format!(
+        " Repositories under {}: {ok} of {} on the right profile ",
+        scan::tildify(&view.root),
+        view.rows.len()
+    );
+    let width = view
+        .rows
+        .iter()
+        .map(|r| r.profile_column().chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("PROFILE".len());
+    let items: Vec<ListItem> = view
+        .rows
+        .iter()
+        .map(|row| {
+            let word = row.status_word();
+            let colour = match word {
+                "ok" | "fixed" => Color::Green,
+                "wrong" => Color::Red,
+                _ => Color::Yellow,
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{word:<6}"), Style::new().fg(colour)),
+                Span::raw(format!("{:<width$}  ", row.profile_column())),
+                // The title names the root, so paths below it are shown short.
+                Span::styled(
+                    match row.repo.root.strip_prefix(&view.root) {
+                        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+                        _ => scan::tildify(&row.repo.root),
+                    },
+                    Style::new().dim(),
+                ),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(Block::bordered().title(title))
+        .highlight_style(
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(view.selected));
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -48,6 +107,7 @@ fn render_help(frame: &mut Frame) {
         ("n", "create a new profile"),
         ("d", "delete the selected profile"),
         ("r", "re-read the repository"),
+        ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
         ("", ""),
@@ -400,6 +460,20 @@ fn history_lines(repo: &Repo, reference: Option<&str>) -> Vec<Line<'static>> {
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
     let line = match &app.status {
         Some(msg) => Line::from(msg.clone().cyan()),
+        None if matches!(app.mode, Mode::Scan(_)) => Line::from(vec![
+            " ↑↓/jk ".bold(),
+            "select  ".dim(),
+            " Enter ".bold(),
+            "apply the rule's profile  ".dim(),
+            " o ".bold(),
+            "open  ".dim(),
+            " r ".bold(),
+            "rescan  ".dim(),
+            " Esc ".bold(),
+            "back  ".dim(),
+            " q ".bold(),
+            "quit".dim(),
+        ]),
         None => Line::from(vec![
             " ↑↓/jk ".bold(),
             "select  ".dim(),
@@ -485,6 +559,7 @@ mod tests {
             status: None,
             mode: Mode::Normal,
             should_quit: false,
+            scan_root: "/home/ada/work".into(),
         }
     }
 
@@ -544,6 +619,48 @@ mod tests {
     fn confirm_delete_popup() {
         let mut app = app(profiles(), Some(repo()));
         app.mode = Mode::ConfirmDelete;
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn scan_view() {
+        use crate::check::Verdict;
+        use crate::rules::Reason;
+        use crate::scan::Row;
+        let row = |root: &str, verdict: Verdict| Row {
+            repo: Repo {
+                root: root.into(),
+                ..repo()
+            },
+            verdict,
+            fixed: None,
+        };
+        let mut app = app(profiles(), Some(repo()));
+        app.mode = Mode::Scan(Box::new(ScanView {
+            root: "/home/ada/work".into(),
+            rows: vec![
+                row(
+                    "/home/ada/work/acme/api",
+                    Verdict::WrongProfile {
+                        root: "/home/ada/work/acme/api".into(),
+                        expected: "acme".into(),
+                        reason: Reason::Remote("github.com/acme/*".into()),
+                        actual: Some("personal".into()),
+                        identity: Identity::default(),
+                    },
+                ),
+                row("/home/ada/work/acme/web", Verdict::Match("acme".into())),
+                row(
+                    "/home/ada/work/scratch",
+                    Verdict::Mismatch {
+                        root: "/home/ada/work/scratch".into(),
+                        identity: Identity::default(),
+                        no_profiles: false,
+                    },
+                ),
+            ],
+            selected: 1,
+        }));
         insta::assert_snapshot!(draw(&app));
     }
 }
