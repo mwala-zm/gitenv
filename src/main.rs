@@ -60,11 +60,11 @@ enum Command {
     },
     /// Write a profile into the repo's .git/config without the UI
     ///
-    /// Sets user.name, user.email and, when the profile has them,
-    /// user.signingkey and core.sshCommand, exactly as Enter does in the
-    /// UI. Without PROFILE, applies the profile whose rules claim the
-    /// repo, which makes `gitenv apply` a one-liner for a post-checkout
-    /// hook or a clone wrapper.
+    /// Sets user.name and user.email, and the signing key, gpg.format,
+    /// commit.gpgsign, core.sshCommand and [profiles.git] keys the profile
+    /// has, exactly as Enter does in the UI. Without PROFILE, applies the
+    /// profile whose rules claim the repo, which makes `gitenv apply` a
+    /// one-liner for a post-checkout hook or a clone wrapper.
     Apply {
         /// Profile name; defaults to the one whose rules claim this repo
         profile: Option<String>,
@@ -117,11 +117,13 @@ enum Command {
     },
     /// Re-author unpushed commits made with the wrong identity
     ///
-    /// Finds commits on HEAD that no remote branch has and whose author is
-    /// not the profile this repo should use (the one a rule claims it for,
-    /// else the one it is on), applies that profile, and replays the
-    /// unpushed commits with the author fixed and the author date kept.
-    /// Pushed commits are never rewritten. Asks first unless --yes.
+    /// Finds commits on HEAD that no remote branch, tag or other local
+    /// branch has, and whose author or committer is not the profile this
+    /// repo should use (the one a rule claims it for, else the one it is
+    /// on). Rebuilds them with that profile, keeping author dates and
+    /// messages, without touching the work tree or index, then applies the
+    /// profile. Refuses during a rebase or merge, or when it cannot tell
+    /// what is pushed. Asks first unless --yes.
     FixAuthors {
         /// Rewrite without asking
         #[arg(long, short)]
@@ -228,7 +230,6 @@ fn main() -> Result<ExitCode> {
     }
 }
 
-/// Run a subcommand on a directory, exiting 2 if it is not one.
 fn in_dir(arg: Option<PathBuf>, run: impl FnOnce(&Path) -> ExitCode) -> ExitCode {
     match resolve_dir(arg) {
         Ok(dir) => run(&dir),
@@ -239,7 +240,6 @@ fn in_dir(arg: Option<PathBuf>, run: impl FnOnce(&Path) -> ExitCode) -> ExitCode
     }
 }
 
-/// The directory to look at: the argument if given, else the current one.
 fn resolve_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
     let dir = match arg {
         Some(path) => path,
