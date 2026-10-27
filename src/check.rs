@@ -1,8 +1,3 @@
-//! The `check` subcommand: is this repo's git identity one of the saved
-//! profiles? Prints nothing and exits 0 when it is, so a pre-commit or
-//! pre-push hook stays quiet on the happy path. Exits 1 on a mismatch and
-//! 2 when it could not even look (not a repo, unreadable config, no git).
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -36,6 +31,8 @@ impl Verdict {
     }
 }
 
+/// When a rule claims the repo, its identity must satisfy that profile;
+/// otherwise any profile it satisfies will do.
 pub fn verdict(config: &Config, repo: &Repo) -> Verdict {
     let actual = config.matching(&repo.effective);
     if let Some((expected, reason)) = rules::expected(config, repo) {
@@ -281,7 +278,6 @@ mod tests {
         let mut r = repo(id);
         r.remote = Some("git@github.com:ada/sig.git".into());
         assert_eq!(verdict(&config, &r), Verdict::Match("oss-signed".into()));
-        // Without the rule, the profile that pins more still wins.
         r.remote = None;
         assert_eq!(verdict(&config, &r), Verdict::Match("oss-signed".into()));
     }

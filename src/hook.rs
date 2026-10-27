@@ -1,11 +1,3 @@
-//! The `hook` subcommand: install `gitenv check` as pre-commit and
-//! pre-push hooks, in one repository or for every repository at once.
-//!
-//! Hooks gitenv did not write, or that were edited since, are never
-//! overwritten or removed. git skips `.git/hooks` once `core.hooksPath` is
-//! set, so `--global` also writes a hook for every other event git runs
-//! hooks for, each handing over to the repository's own hook.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -13,12 +5,7 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, Result, bail};
 
 const MARKER: &str = "# Installed by `gitenv hook install`.";
-/// The hooks that run the identity check.
 const CHECKED: [&str; 2] = ["pre-commit", "pre-push"];
-/// Every hook a repository may rely on, from githooks(5). Left out:
-/// reference-transaction and post-index-change, which run on nearly every
-/// git command and would slow all of them down for the few repos that use
-/// them.
 const ALL: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
@@ -47,6 +34,9 @@ const ALL: &[&str] = &[
     "p4-pre-submit",
 ];
 
+/// The hook's text. With `global` it hands over to the repo's own hook of the
+/// same name, unless that is this very file (`-ef`), as when the global hooks
+/// path is some repo's own hooks folder.
 fn script(name: &str, global: bool) -> String {
     let mut text = format!("#!/bin/sh\n{MARKER}\n");
     if CHECKED.contains(&name) {
@@ -59,8 +49,6 @@ fn script(name: &str, global: bool) -> String {
         );
     }
     if global {
-        // `-ef` stops a hook from running itself forever when the global
-        // hooks path is some repo's own hooks folder.
         text.push_str(&format!(
             "# core.hooksPath makes git skip the repo's own hooks; run it here.\n\
              own=\"$(git rev-parse --git-common-dir)/hooks/{name}\"\n\
@@ -86,9 +74,10 @@ fn default_global_dir() -> Result<PathBuf> {
     Ok(dirs.home_dir().join(".githooks"))
 }
 
-/// Where hooks go: the repo's hooks directory (which honours a local
-/// `core.hooksPath`), or the global `core.hooksPath`, `~/.githooks` if
-/// none is set yet. The flag says whether the global setting is missing.
+/// The repo's hooks directory, which honours a local core.hooksPath, or the
+/// global core.hooksPath, `~/.githooks` if none is set yet; the flag says it is
+/// not set. A relative global path is refused, since git reads it relative to
+/// each repository.
 fn hooks_dir(dir: &Path, global: bool) -> Result<(PathBuf, bool)> {
     if global {
         return match git(dir, &["config", "--global", "core.hooksPath"])? {
@@ -122,9 +111,7 @@ fn hooks_dir(dir: &Path, global: bool) -> Result<(PathBuf, bool)> {
 #[derive(Debug, PartialEq, Eq)]
 enum State {
     Missing,
-    /// Exactly what gitenv writes, so safe to replace or remove.
     Ours,
-    /// gitenv's, but changed since.
     Edited,
     Foreign,
 }
@@ -138,6 +125,11 @@ fn state(path: &Path, name: &str) -> State {
     }
 }
 
+/// Writes the hooks, never replacing one gitenv did not write or that was
+/// edited since. git skips each repo's own `.git/hooks` once core.hooksPath is
+/// set, so `global` also writes a hook for every other event that only hands
+/// over to the repo's own; reference-transaction and post-index-change are left
+/// out because they run on nearly every git command.
 fn write_hooks(hooks: &Path, global: bool) -> Result<Vec<String>> {
     fs::create_dir_all(hooks).with_context(|| format!("creating {}", hooks.display()))?;
     let names: &[&str] = if global { ALL } else { &CHECKED };
@@ -190,7 +182,6 @@ fn write_hooks(hooks: &Path, global: bool) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Remove the hooks gitenv wrote and nobody edited since.
 fn remove_hooks(hooks: &Path) -> Vec<String> {
     let mut lines = Vec::new();
     let mut removed = 0;
@@ -243,6 +234,9 @@ pub fn install(dir: &Path, global: bool) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
+/// Removes the hooks gitenv wrote that nobody edited. An empty `~/.githooks`
+/// left as the global core.hooksPath would switch off every repo's own hooks,
+/// so the setting install made is undone.
 pub fn remove(dir: &Path, global: bool) -> Result<String> {
     let (hooks, _) = hooks_dir(dir, global)?;
     let mut lines = remove_hooks(&hooks);
@@ -251,8 +245,6 @@ pub fn remove(dir: &Path, global: bool) -> Result<String> {
     } else {
         lines.insert(0, format!("gitenv: hooks in {}", hooks.display()));
     }
-    // An empty ~/.githooks left as core.hooksPath would silently switch
-    // off every repo's own hooks, so undo the setting install made.
     let empty = fs::read_dir(&hooks).is_ok_and(|mut d| d.next().is_none());
     if global && empty && hooks == default_global_dir()? {
         let status = Command::new("git")
@@ -329,7 +321,6 @@ mod tests {
             assert_eq!(mode & 0o111, 0o111);
         }
 
-        // Running again rewrites its own hook rather than refusing.
         assert!(install(&dir, false).unwrap().contains("wrote"));
 
         let out = remove(&dir, false).unwrap();
@@ -352,8 +343,6 @@ mod tests {
         let dir = repo("run");
         let hooks = dir.join("global-hooks");
         write_hooks(&hooks, true).unwrap();
-        // The repo's own hook runs after the check; with gitenv off PATH
-        // the check is skipped with a warning instead of blocking.
         fs::write(
             dir.join(".git/hooks/pre-commit"),
             "#!/bin/sh\necho own-hook-ran\n",
@@ -381,8 +370,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Run `cmd`, killing it and everything it started if it takes longer
-    /// than ten seconds; a looping hook outlives a killed git otherwise.
     #[cfg(unix)]
     fn run_with_timeout(cmd: &mut Command) -> std::process::Output {
         use std::os::unix::process::CommandExt;

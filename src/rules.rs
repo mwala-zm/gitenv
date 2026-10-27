@@ -1,9 +1,3 @@
-//! Which profile a repository *should* be on.
-//!
-//! A profile can claim repositories by remote URL or by path. Each rule is
-//! a glob. The most specific matching rule wins: a remote rule beats a path
-//! rule, then the rule with the longer literal prefix, then the earlier one.
-
 use std::cmp::Reverse;
 use std::path::Path;
 
@@ -18,30 +12,23 @@ const OPTIONS: MatchOptions = MatchOptions {
     require_literal_leading_dot: false,
 };
 
-/// Reduce every way of writing a remote to `host/owner/repo`, lowercase:
-///
-/// - `git@github.com:acme/api.git`        -> `github.com/acme/api`
-/// - `https://github.com/acme/api.git`    -> `github.com/acme/api`
-/// - `ssh://git@github.com:22/acme/api`   -> `github.com/acme/api`
-///
-/// Patterns are passed through the same function, so a rule can be written
-/// in whichever form the user copies from their hosting provider.
 fn normalize_remote(url: &str) -> String {
     remote_host_path(url).to_ascii_lowercase()
 }
 
-/// [`normalize_remote`] without lowercasing, for patterns handed to git,
-/// which compares URLs case-sensitively.
+/// Reduces every way of writing a remote to `host/owner/repo`:
+/// `git@github.com:acme/api.git`, `https://user:token@github.com/acme/api.git`
+/// and `ssh://git@github.com:22/acme/api` all give `github.com/acme/api`.
+/// Patterns go through it too, so a rule can be written in whichever form the
+/// hosting provider shows. With a scheme the host part ends at the first `/`,
+/// so a `:` before an `@` there is a password, and only there can a port follow
+/// the host.
 pub fn remote_host_path(url: &str) -> String {
     let url = url.trim();
     let (has_scheme, mut s) = match url.split_once("://") {
         Some((_, rest)) => (true, rest),
         None => (false, url),
     };
-    // Drop `user@` or `user:token@`, but only when the `@` is part of the
-    // host, not the path. With a scheme the host part ends at the first
-    // `/`, so a `:` in it may be a password; scp-like `user@host:path`
-    // cannot carry one.
     let host_end = if has_scheme {
         s.find('/')
     } else {
@@ -52,7 +39,6 @@ pub fn remote_host_path(url: &str) -> String {
         s = &s[at + 1..];
     }
     let (host, mut path) = s.split_once(['/', ':']).unwrap_or((s, ""));
-    // `ssh://host:22/path` carries a port; scp-like `host:path` never does.
     if has_scheme
         && let Some((port, rest)) = path.split_once('/')
         && !port.is_empty()
@@ -65,7 +51,6 @@ pub fn remote_host_path(url: &str) -> String {
     format!("{host}/{path}").trim_end_matches('/').to_string()
 }
 
-/// A leading `~` is the home directory; a trailing `/` is dropped.
 fn expand_path(pattern: &str) -> String {
     let expanded = crate::git::expand_tilde(Path::new(pattern))
         .display()
@@ -76,11 +61,11 @@ fn expand_path(pattern: &str) -> String {
     }
 }
 
-/// `pattern` with its leading directories resolved through symlinks, when
-/// that changes it. git reports a repository's resolved path, so a rule
-/// written through a symlink would otherwise never match. The longest
-/// leading directory that exists is used, so a rule for a folder not
-/// created yet still sees through a symlinked parent.
+/// `pattern` with its leading directories resolved through symlinks, when that
+/// changes it. git reports a repository's resolved path, so a rule written
+/// through a symlink would otherwise never match. The longest leading directory
+/// that exists is used, so a rule for a folder not created yet still sees
+/// through a symlinked parent.
 fn resolve_path(pattern: &str) -> Option<String> {
     if !Path::new(pattern).is_absolute() {
         return None;
@@ -100,7 +85,6 @@ fn matches(pattern: &str, subject: &str) -> bool {
     Pattern::new(pattern).is_ok_and(|p| p.matches_with(subject, OPTIONS))
 }
 
-/// `dir/**` also matches `dir` itself.
 fn path_matches(pattern: &str, root: &str) -> bool {
     matches(pattern, root)
         || pattern
@@ -108,7 +92,6 @@ fn path_matches(pattern: &str, root: &str) -> bool {
             .is_some_and(|dir| matches(dir, root))
 }
 
-/// How much of a pattern is plain text before the first wildcard.
 fn literal_len(pattern: &str) -> usize {
     pattern.find(['*', '?', '[']).unwrap_or(pattern.len())
 }
@@ -128,21 +111,15 @@ impl std::fmt::Display for Reason {
     }
 }
 
-/// One remote or path pattern of one profile.
 #[derive(Debug, Clone)]
 pub struct Rule<'a> {
     pub profile: &'a Profile,
     pub reason: Reason,
-    /// Higher is more specific: remote rules first, then longer literal
-    /// prefixes.
     pub rank: (bool, usize),
-    /// Remote rules reduced to `host/path`, path rules expanded.
     pub pattern: String,
-    /// A path rule's pattern resolved through symlinks, when different.
     pub resolved: Option<String>,
 }
 
-/// Every rule in file order.
 pub fn all(config: &Config) -> Vec<Rule<'_>> {
     config
         .profiles
@@ -173,6 +150,9 @@ pub fn all(config: &Config) -> Vec<Rule<'_>> {
         .collect()
 }
 
+/// The profile whose rule claims `repo`, and the rule. The most specific
+/// matching rule wins: a remote rule beats a path rule, then the one with the
+/// longer literal prefix, then the earlier one in the file.
 pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Reason)> {
     let urls: Vec<String> = repo
         .rule_remotes()
@@ -192,7 +172,6 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
                         .is_some_and(|p| path_matches(p, &root))
             }
         })
-        // `min_by_key` keeps the first of equals, so ties go to file order.
         .min_by_key(|rule| Reverse(rule.rank))
         .map(|rule| (rule.profile, rule.reason))
 }
@@ -204,8 +183,6 @@ pub fn validate(patterns: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Path rules are globs and must be absolute (or start with `~`): repo
-/// roots are, so a relative pattern would never match.
 pub fn validate_paths(patterns: &[String]) -> Result<(), String> {
     validate(patterns)?;
     match patterns
@@ -252,7 +229,6 @@ mod tests {
         assert!(remote_matches("github.com/acme/api", url));
         assert!(remote_matches("*/acme/*", url));
         assert!(!remote_matches("github.com/other/*", url));
-        // `*` stops at a slash: owner-level rule does not match the repo.
         assert!(!remote_matches("github.com/*", url));
         assert!(remote_matches("github.com/**", url));
     }
@@ -375,7 +351,6 @@ mod tests {
         .unwrap();
         assert_eq!(p.name, "acme");
 
-        // A remote says more about a repo than where it was cloned to.
         let (p, why) = expected(
             &config,
             &repo(

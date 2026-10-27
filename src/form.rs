@@ -169,7 +169,8 @@ impl Form {
         self.cursor = start;
     }
 
-    /// Uniqueness of the name is checked by `App`, which knows the other profiles.
+    /// Uniqueness of the name is checked by `App`, which knows the other
+    /// profiles.
     pub fn to_profile(&self) -> Result<Profile, String> {
         let [
             name,
@@ -243,8 +244,8 @@ impl Form {
     }
 }
 
-/// Split `k=v, k2=v2` only at commas that start another `key=`, so a value
-/// may itself contain commas, as in `alias.lg=log --format=%h,%s`.
+/// Splits `k=v, k2=v2` only at commas that start another `key=`, so a value may
+/// itself contain commas, as in `alias.lg=log --format=%h,%s`.
 fn split_pairs(s: &str) -> Vec<String> {
     let mut pairs = Vec::new();
     let mut start = 0;

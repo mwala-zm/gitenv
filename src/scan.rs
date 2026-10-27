@@ -18,8 +18,6 @@ pub struct Options {
 
 const SKIP: &[&str] = &["node_modules", "target", ".git"];
 
-/// Does not descend into a repository once found, into hidden directories,
-/// or through symlinks.
 pub fn find_repos(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk(root, &mut found);
@@ -72,17 +70,15 @@ impl Row {
         }
     }
 
-    /// `personal -> acme` for a wrong or just fixed repo, else the profile.
     pub fn profile_column(&self) -> String {
         short_status(&self.verdict)
     }
 }
 
-/// Repos are visited on a few threads. Returns the rows and a warning per
-/// repository that could not be read or fixed.
+/// Inspects every repository under `root` on a few threads. `root` is resolved
+/// first, since git reports resolved paths and path rules need absolute ones.
+/// Returns the rows and a warning per repository git cannot read.
 pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<(Vec<Row>, Vec<String>)> {
-    // git reports resolved paths, and path rules expect absolute ones, so
-    // `scan .` and a symlinked folder must be resolved before matching.
     let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let paths = find_repos(&root);
     let next = AtomicUsize::new(0);
@@ -116,11 +112,11 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<(Vec<Row>, V
     Ok((rows, warnings))
 }
 
-/// A row, or a warning when git cannot read the repository. A fix that
-/// does not take is reported on stderr and the row stays `wrong`.
+/// One `git` process per repository: the walk found its top level already and
+/// the table shows no history. With `fix`, a wrong repository a rule claims
+/// gets that profile and is read again; a fix that worktree config or the
+/// environment overrides is reported and the row stays wrong.
 fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> {
-    // The walk found the top level already and the table shows no history,
-    // so this costs one `git` process instead of four.
     let Some(repo) = git::open(path.to_path_buf(), 0) else {
         return Err(format!("skipped {}: git cannot read it", tildify(path)));
     };
@@ -137,7 +133,6 @@ fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> 
         {
             fixed = Some(profile.name.clone());
         } else {
-            // Worktree config or the environment still overrides it.
             eprintln!(
                 "gitenv: applied '{}' to {} but git still uses another identity there",
                 profile.name,
@@ -263,7 +258,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         init(&base.join("play/toy"), "git@github.com:ada/toy.git");
         init(&base.join("work/api"), "git@github.com:acme/api.git");
-        // Nested inside a repo: must not be listed separately.
         init(
             &base.join("work/api/vendor/lib"),
             "git@github.com:acme/lib.git",

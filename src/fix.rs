@@ -1,12 +1,3 @@
-//! The `fix-authors` subcommand: rewrite commits that have not been pushed
-//! anywhere and were made with another identity than the repo should use.
-//!
-//! Commits are rebuilt with `git commit-tree` from their own trees and
-//! messages, and the branch is moved once with `git update-ref`, so the
-//! work tree, the index, ignored files and hooks are never touched.
-//! Commits a remote, a tag or another local branch has are left alone, so
-//! nothing published or shared is rewritten.
-
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -54,8 +45,6 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// The profile commits here should carry: the one a rule claims the repo
-/// for, else the one it is on now.
 pub fn target<'a>(config: &'a Config, repo: &Repo) -> Result<&'a Profile> {
     if let Some((profile, _)) = rules::expected(config, repo) {
         return Ok(profile);
@@ -69,7 +58,6 @@ pub fn target<'a>(config: &'a Config, repo: &Repo) -> Result<&'a Profile> {
     })
 }
 
-/// The current branch, or `None` with a detached HEAD.
 fn current_branch(root: &Path) -> Option<String> {
     git_out(root, &["symbolic-ref", "-q", "--short", "HEAD"])
         .ok()
@@ -78,7 +66,8 @@ fn current_branch(root: &Path) -> Option<String> {
 }
 
 /// `rev-list` arguments that leave out every commit something else has:
-/// remote-tracking branches, tags, and local branches other than this one.
+/// remote-tracking branches, tags, and local branches other than this one, so
+/// nothing published or shared is rewritten.
 fn published(root: &Path) -> Vec<String> {
     let mut args = vec!["--not".to_string(), "--remotes".into(), "--tags".into()];
     if let Some(branch) = current_branch(root) {
@@ -88,7 +77,6 @@ fn published(root: &Path) -> Vec<String> {
     args
 }
 
-/// Commits on HEAD that nothing else has, oldest first.
 fn unpushed(root: &Path) -> Result<Vec<Commit>> {
     if !git_ok(root, &["rev-parse", "--verify", "-q", "HEAD"]) {
         return Ok(Vec::new());
@@ -122,9 +110,7 @@ fn unpushed(root: &Path) -> Result<Vec<Commit>> {
 }
 
 pub struct Plan {
-    /// Every commit only HEAD has.
     pub unpushed: Vec<Commit>,
-    /// The ones whose author or committer is not the profile.
     pub wrong: Vec<Commit>,
 }
 
@@ -154,7 +140,11 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
     })
 }
 
-/// Reasons not to touch the branch at all.
+/// Refuses while git is in the middle of a rebase, merge, cherry-pick, revert
+/// or bisect; when the branch tracks a remote branch this clone has no copy of,
+/// as in a single-branch clone, since it may be pushed without gitenv seeing
+/// it; when the commits include a merge; and when they reach a shallow clone's
+/// cut-off.
 fn preflight(root: &Path, plan: &Plan) -> Result<()> {
     for (name, what) in [
         ("rebase-merge", "a rebase"),
@@ -168,8 +158,6 @@ fn preflight(root: &Path, plan: &Plan) -> Result<()> {
             bail!("git is in the middle of {what}; finish or abort it first");
         }
     }
-    // A branch set to track one that has no remote-tracking ref (a
-    // single-branch clone, say) may well be pushed without gitenv seeing it.
     if let Some(branch) = current_branch(root)
         && let Ok(remote) = git_out(root, &["config", &format!("branch.{branch}.remote")])
         && remote.trim() != "."
@@ -197,17 +185,17 @@ fn preflight(root: &Path, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// The parts of a raw commit object `commit-tree` needs again.
 struct Raw {
     tree: String,
     parents: Vec<String>,
-    /// `Name <email> <timestamp> <zone>`
     author: String,
     encoding: Option<String>,
     message: Vec<u8>,
 }
 
-/// Read many commits with one `git cat-file --batch`.
+/// Reads the commits with one `git cat-file --batch`, parsing its `<hash>
+/// commit <size>` headers. The hashes are written from a thread so a large
+/// batch cannot fill both pipes.
 fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
     let mut child = Command::new("git")
         .arg("-C")
@@ -219,7 +207,6 @@ fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
         .context("running git cat-file")?;
     let mut stdin = child.stdin.take().context("writing to git cat-file")?;
     let input: String = hashes.iter().map(|h| format!("{h}\n")).collect();
-    // Written from a thread so a large batch cannot fill both pipes.
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
     let output = child.wait_with_output()?;
     writer
@@ -228,7 +215,6 @@ fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
     let mut rest = output.stdout.as_slice();
     let mut commits = Vec::with_capacity(hashes.len());
     for hash in hashes {
-        // `<hash> commit <size>\n<content>\n`
         let line_end = rest
             .iter()
             .position(|&b| b == b'\n')
@@ -248,6 +234,9 @@ fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
     Ok(commits)
 }
 
+/// Signature headers (gpgsig, mergetag) and their continuation lines are
+/// dropped: the rebuilt commit is a different one, so they would no longer be
+/// valid.
 fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
     let split = bytes
         .windows(2)
@@ -261,8 +250,6 @@ fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
         encoding: None,
         message: bytes[split..].to_vec(),
     };
-    // Continuation lines of gpgsig and mergetag start with a space and are
-    // dropped: the commit changes, so its old signature would be invalid.
     for line in headers.lines() {
         if let Some(v) = line.strip_prefix("tree ") {
             raw.tree = v.to_string();
@@ -280,7 +267,6 @@ fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-/// Split `Name <email> 1700000000 +0200` into its three parts.
 fn split_ident(ident: &str) -> Option<(&str, &str, &str)> {
     let open = ident.rfind('<')?;
     let close = ident.rfind('>')?;
@@ -291,10 +277,12 @@ fn split_ident(ident: &str) -> Option<(&str, &str, &str)> {
     ))
 }
 
-/// Rebuild the unpushed commits from the first wrong one on, with the
-/// profile as author of each wrong one (keeping its author date) and as
-/// committer of all of them, then move HEAD once. The profile is applied
-/// to the repo only after that has worked.
+/// Rebuilds the unpushed commits from the first wrong one on with `git
+/// commit-tree`, from their own trees and exact message bytes, with the profile
+/// as author of each wrong one (keeping its author date) and as committer of
+/// all of them. HEAD then moves once with `update-ref`, which fails if it moved
+/// meanwhile. The work tree, index, ignored files and hooks are never touched,
+/// and the profile is applied only after all that worked.
 pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
     let root = &repo.root;
     preflight(root, plan)?;
@@ -429,7 +417,6 @@ fn try_run(dir: &Path, yes: bool) -> Result<ExitCode> {
         );
         return Ok(ExitCode::SUCCESS);
     }
-    // Refuse before asking, so a "yes" is never wasted on a no.
     preflight(&repo.root, &plan)?;
     println!(
         "gitenv: {} of {} unpushed commit(s) will be re-authored as profile '{}' ({} <{}>):",
@@ -471,8 +458,6 @@ fn try_run(dir: &Path, yes: bool) -> Result<ExitCode> {
 mod tests {
     use super::*;
 
-    /// git with a blank global config, so the tests do not depend on the
-    /// machine's settings.
     fn git_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> String {
         let output = Command::new("git")
             .arg("-C")
@@ -553,7 +538,6 @@ mod tests {
         git(&work, &["push", "-q", "origin", "HEAD:main"]);
         git(&work, &["fetch", "-q"]);
         let pushed = git(&work, &["rev-parse", "HEAD"]);
-        // An old author date, so keeping it is not a coincidence.
         git_env(
             &work,
             &[
@@ -616,8 +600,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The old rebase-based rewrite checked out every commit, which deleted
-    /// ignored files a past commit had tracked.
     #[test]
     fn leaves_the_work_tree_index_and_ignored_files_alone() {
         let dir = base("tree");
@@ -701,7 +683,6 @@ mod tests {
             &["rebase", "-q", "-i", "HEAD~2"],
             &[("GIT_SEQUENCE_EDITOR", "sed -i.bak '1s/^pick/edit/'")],
         );
-        // Work done while stopped is on HEAD and nowhere else.
         commit(&dir, "ada@example.com", "user work during the rebase");
         let head = git(&dir, &["rev-parse", "HEAD"]);
         let err = fix(&dir).unwrap_err().to_string();
@@ -811,14 +792,12 @@ mod tests {
         let err = fix_wrong_after(&dir).unwrap_err().to_string();
         assert!(err.contains("include a merge"), "{err}");
 
-        // Once the merge is published (tagged here), it no longer matters.
         git(&dir, &["tag", "v1", "HEAD~1"]);
         fix(&dir).unwrap();
         assert!(plan_is_clean(&dir));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Add a wrong commit on top and try to fix it.
     fn fix_wrong_after(dir: &Path) -> Result<()> {
         commit(dir, "ada@example.com", "wrong");
         fix(dir)

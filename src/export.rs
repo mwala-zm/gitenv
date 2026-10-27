@@ -1,14 +1,3 @@
-//! The `export` subcommand: write profiles and their rules as git's own
-//! conditional includes, so git picks the identity by itself, even in a
-//! fresh clone, without gitenv running.
-//!
-//! Each profile with rules gets a file holding its identity, and
-//! `includes.gitconfig` pulls those in with `includeIf`: path rules become
-//! `gitdir/i:` conditions and remote rules `hasconfig:remote.*.url:`
-//! conditions. When several match, git keeps the last value it reads, so
-//! the blocks are written least specific first and the rule gitenv would
-//! pick is the one that sticks.
-
 use std::cmp::Reverse;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,8 +12,6 @@ use crate::rules::{self, Reason, Rule};
 pub const INCLUDES: &str = "includes.gitconfig";
 const HEADER: &str = "# Written by `gitenv export`; changes here are overwritten.";
 
-/// Beside the profiles file, in a directory of its own so cleaning up old
-/// files never touches anything else.
 pub fn dir(config_path: &Path) -> PathBuf {
     config_path
         .parent()
@@ -32,7 +19,6 @@ pub fn dir(config_path: &Path) -> PathBuf {
         .join("gitenv-includes")
 }
 
-/// Double-quote a value or subsection the way git config reads it back.
 fn quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -49,7 +35,6 @@ fn quote(s: &str) -> String {
     out
 }
 
-/// `url.git@host:acme/.insteadOf` -> (`[url "git@host:acme/"]`, `insteadOf`).
 fn split_key(key: &str) -> (String, &str) {
     let first = key.find('.').unwrap_or(key.len());
     let last = key.rfind('.').unwrap_or(key.len());
@@ -63,8 +48,6 @@ fn split_key(key: &str) -> (String, &str) {
     (header, &key[last + 1..])
 }
 
-/// Render `key = value` pairs as git config, one section per run of keys
-/// that share a header.
 fn render(entries: &[(String, String)]) -> String {
     let mut out = format!("{HEADER}\n");
     let mut current = String::new();
@@ -80,10 +63,6 @@ fn render(entries: &[(String, String)]) -> String {
     out
 }
 
-/// Which of the keys git has a harmless default for some exported profile
-/// sets. Every other exported profile then writes that default, because
-/// git keeps every key of every matching include and only the ones the
-/// winning profile sets would otherwise be overridden.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Shared {
     signing_format: bool,
@@ -101,6 +80,10 @@ impl Shared {
     }
 }
 
+/// The settings in a profile's file. git keeps every key of every matching
+/// include, so a profile that leaves gpg.format, commit.gpgsign or
+/// core.sshCommand unset writes git's harmless default for it whenever another
+/// exported profile sets it; the losing profile's value would stick otherwise.
 fn entries(profile: &Profile, shared: Shared) -> Vec<(String, String)> {
     let mut entries = vec![
         ("user.name".to_string(), profile.user_name.clone()),
@@ -153,10 +136,10 @@ fn case_insensitive(glob: &str) -> String {
     out
 }
 
-/// The path part of an scp-style URL pattern (`host:<path>`). git's
-/// wildmatch only treats `**` as crossing slashes at the start of a pattern
-/// or after a `/`, and here it follows `:`, so a leading `**` is spelled
-/// out as "no directory" and "one or more".
+/// The path part of an scp-style URL pattern (`host:<path>`). git's wildmatch
+/// only lets `**` cross slashes at the start of a pattern or after a `/`, and
+/// here it follows `:`, so a leading `**` is spelled out as no directory and
+/// one or more.
 fn scp_paths(path: &str) -> Vec<String> {
     match path.strip_prefix("**") {
         Some("") => vec!["*".into(), "*/**".into()],
@@ -166,11 +149,11 @@ fn scp_paths(path: &str) -> Vec<String> {
     }
 }
 
-/// The `includeIf` conditions that hold wherever `rule` claims a repo.
-/// Path rules match the `.git` directory git checks, both as written and
-/// through symlinks. Remote rules are spelled out for every URL form, with
-/// and without user, port, `.git` and a trailing slash, and made
-/// case-insensitive by hand because git compares remote URLs exactly.
+/// The `includeIf` conditions that hold wherever `rule` claims a repo. Path
+/// rules match the `.git` directory git checks, as written and through
+/// symlinks. Remote rules are spelled out for every URL form, with and without
+/// user, port, `.git` and a trailing slash, and made case-insensitive by hand
+/// because git compares remote URLs exactly.
 pub fn conditions(rule: &Rule) -> Vec<String> {
     match &rule.reason {
         Reason::Path(_) => {
@@ -220,9 +203,6 @@ pub fn conditions(rule: &Rule) -> Vec<String> {
     }
 }
 
-/// A file name for each profile, unique even when names differ only in
-/// case or in characters a file name should not carry, and never
-/// `includes.gitconfig`.
 fn file_names<'a>(profiles: impl Iterator<Item = &'a Profile>) -> Vec<(&'a Profile, String)> {
     let mut taken: Vec<String> = Vec::new();
     profiles
@@ -278,11 +258,12 @@ fn check_keys(profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-/// Write every file into `out` and remove ones an earlier export left for
-/// profiles that are gone or no longer have rules. Blocks are ordered least
-/// specific first, ties with the earliest profile last, so the value git
-/// keeps is the one from the rule gitenv would pick. Relative path rules
-/// never match and are skipped.
+/// Writes each profile with rules to its own file and an `includes.gitconfig`
+/// that loads them with `includeIf`, then removes files an earlier export left
+/// for profiles that are gone. git keeps the last value it reads, so blocks go
+/// least specific first, ties with the earliest profile last, and the value git
+/// keeps is the one from the rule gitenv would pick. Relative path rules never
+/// match and are skipped.
 pub fn write(config: &Config, out: &Path) -> Result<Written> {
     let with_rules: Vec<&Profile> = config
         .profiles
@@ -352,8 +333,6 @@ pub fn write(config: &Config, out: &Path) -> Result<Written> {
     })
 }
 
-/// Rewrite the files after the profiles change, but only once the user has
-/// exported before; returns whether anything was written.
 pub fn refresh(config: &Config, config_path: &Path) -> Result<bool> {
     let out = dir(config_path);
     if !out.join(INCLUDES).exists() {
@@ -363,7 +342,6 @@ pub fn refresh(config: &Config, config_path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-/// The file `git config --global` reads and writes.
 fn global_config_file() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("GIT_CONFIG_GLOBAL").filter(|v| !v.is_empty()) {
         return Ok(git::expand_tilde(Path::new(&path)));
@@ -401,10 +379,10 @@ enum Installed {
     AlreadyThere,
 }
 
-/// Make `config_file` include `includes` after every setting of `keys`,
-/// since git keeps the last value it reads. A new `[include]` section is
-/// appended rather than using `git config --add`, which would put the line
-/// in an existing `[include]` section, often at the top of the file.
+/// Makes `config_file` include `includes` after every setting of `keys`, since
+/// git keeps the last value it reads. A new `[include]` section is appended
+/// rather than using `git config --add`, which would put the line in an
+/// existing `[include]` section, often at the top of the file.
 fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<Installed> {
     let output = Command::new("git")
         .args(["config", "--file"])
@@ -553,7 +531,6 @@ mod tests {
         dir
     }
 
-    /// git in `dir` with a global config that only includes the export.
     fn git_with(global: &Path, dir: &Path, args: &[&str]) -> (bool, String) {
         let output = Command::new("git")
             .arg("-C")
@@ -813,7 +790,6 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
-    /// Real git, with a throwaway global config pointing at the export.
     #[test]
     fn git_picks_the_identity_from_the_export() {
         let base = base("e2e");

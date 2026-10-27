@@ -1,6 +1,3 @@
-//! Shells out to `git` rather than linking a library, so behaviour matches
-//! exactly what the developer sees on the command line.
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,12 +14,10 @@ pub struct Identity {
     pub ssh_command: Option<String>,
     pub signing_format: Option<SigningFormat>,
     pub sign_commits: Option<bool>,
-    /// Every config value in scope, keyed as `git config --list` prints them,
-    /// so a profile's extra `git` keys can be checked without knowing them.
     pub settings: BTreeMap<String, String>,
 }
 
-/// Write a config key the way `git config --list` prints it: section and
+/// Writes a config key the way `git config --list` prints it: section and
 /// variable name lowercased, any subsection in between left alone.
 pub fn normalize_key(key: &str) -> String {
     let Some(first) = key.find('.') else {
@@ -49,10 +44,12 @@ pub fn git_bool(s: &str) -> Option<bool> {
 }
 
 impl Identity {
+    /// Whether the identity satisfies `profile`: name, email
+    /// (case-insensitively, as hosts compare them) and every setting the
+    /// profile pins. An unset gpg.format satisfies openpgp, git's default, and
+    /// an unset commit.gpgsign is off.
     pub fn matches(&self, profile: &Profile) -> bool {
         let name_ok = self.name.as_deref() == Some(profile.user_name.as_str());
-        // Hosts treat email addresses case-insensitively, and so does git
-        // when it maps authors.
         let email_ok = self
             .email
             .as_deref()
@@ -65,8 +62,6 @@ impl Identity {
             Some(key) => self.ssh_command.as_deref() == Some(ssh_command(key).as_str()),
             None => true,
         };
-        // Git defaults gpg.format to openpgp, so an unset value satisfies
-        // a profile that asks for openpgp. An unset commit.gpgsign is off.
         let format_ok = match profile.signing_format {
             Some(want) => self.signing_format.unwrap_or(SigningFormat::Openpgp) == want,
             None => true,
@@ -102,7 +97,6 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// Where the effective name and email come from, for display.
     pub fn identity_source(&self) -> &'static str {
         if author_env("GIT_AUTHOR_NAME").is_some() || author_env("GIT_AUTHOR_EMAIL").is_some() {
             "the GIT_AUTHOR_* environment variables"
@@ -115,9 +109,9 @@ impl Repo {
         }
     }
 
-    /// The remote URLs rules are matched against: `origin` when there is
-    /// one, else every remote, so a clone whose only remote is `upstream`
-    /// is still claimed.
+    /// The remote URLs rules are matched against: `origin` when there is one,
+    /// else every remote, so a clone whose only remote is `upstream` is still
+    /// claimed.
     pub fn rule_remotes(&self) -> Vec<&str> {
         let all = remote_urls(&self.effective.settings);
         if all.is_empty() || self.effective.settings.contains_key("remote.origin.url") {
@@ -130,8 +124,6 @@ impl Repo {
         self.authors.iter().map(|a| a.commits).sum()
     }
 
-    /// `reference` is the email the repo should be using: the expected
-    /// profile's when a rule claims the repo, else the effective one.
     pub fn foreign_authors(&self, reference: Option<&str>) -> Vec<&Author> {
         self.authors
             .iter()
@@ -154,21 +146,20 @@ pub fn discover(dir: &Path) -> Result<Option<Repo>> {
     Ok(open(root, HISTORY_DEPTH))
 }
 
-/// Read the repository whose top level is `root`, looking at the last
-/// `history` commits' authors. `None` if `root` is not a repository.
+/// Reads the repository whose top level is `root`, and the authors of its last
+/// `history` commits, from one `git config --list --show-scope`; `None` if it
+/// is not a repository. With no local config at all git is asked, since the
+/// file may just be empty. Worktree config counts as the repo's own.
+/// GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL and EMAIL override config as they do for
+/// git, which sets the author ones for hooks, so a hook sees the real author.
 pub fn open(root: PathBuf, history: usize) -> Option<Repo> {
     let entries = rewrite_remote_urls(config_list(&root, &["--show-scope"]));
-    // Every repository has local config (core.repositoryformatversion at
-    // least); without any, ask git, since the file may just be empty.
     if !entries.iter().any(|(scope, ..)| scope == "local") && !is_repo(&root) {
         return None;
     }
-    // Worktree-scoped config belongs to this checkout as much as local.
     let own = |scope: &str| scope == "local" || scope == "worktree";
     let all = || entries.iter().map(|(_, k, v)| (k.clone(), v.clone()));
     let mut effective = identity_from(all().collect());
-    // git lets these override config for the commits it makes, and sets
-    // the author ones for hooks, so a hook sees the real author.
     if let Some(name) = author_env("GIT_AUTHOR_NAME") {
         effective.name = Some(name);
     }
@@ -215,8 +206,8 @@ fn is_repo(root: &Path) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Apply `url.<base>.insteadOf` to remote URLs the way git does: the
-/// longest matching prefix is replaced by its base.
+/// Applies `url.<base>.insteadOf` to remote URLs as git does: the longest
+/// matching prefix is replaced by its base.
 fn rewrite_remote_urls(entries: Vec<(String, String, String)>) -> Vec<(String, String, String)> {
     let rewrites: Vec<(String, String)> = entries
         .iter()
@@ -247,7 +238,6 @@ fn rewrite_remote_urls(entries: Vec<(String, String, String)>) -> Vec<(String, S
         .collect()
 }
 
-/// `remote.<name>.url` values, in remote-name order.
 fn remote_urls(settings: &BTreeMap<String, String>) -> Vec<&str> {
     settings
         .iter()
@@ -291,9 +281,9 @@ pub fn global_identity() -> Identity {
     read_identity(&cwd, &["--global"])
 }
 
-/// Whether git accepts `key` as a config key: `section.name` or
-/// `section.subsection.name`, the section and name made of letters,
-/// digits and `-`, the name starting with a letter.
+/// Whether git accepts `key`: `section.name` or `section.subsection.name`, with
+/// section and name made of letters, digits and `-`, and the name starting with
+/// a letter.
 pub fn valid_key(key: &str) -> bool {
     let (Some(first), Some(last)) = (key.find('.'), key.rfind('.')) else {
         return false;
@@ -307,9 +297,10 @@ pub fn valid_key(key: &str) -> bool {
         && !key[first..=last].contains(['\n', '\0'])
 }
 
+/// Writes the profile into the repo's local config and unsets the identity keys
+/// it leaves out. Every extra key is checked first, so a bad one cannot leave
+/// the repo half on one profile and half on another.
 pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
-    // Check every key before writing any, so a bad one cannot leave the
-    // repo half on one profile and half on another.
     if let Some(bad) = profile.git.keys().find(|k| !valid_key(k)) {
         bail!(
             "profile '{}' has '{bad}' under [profiles.git], which is not a git config key",
@@ -341,16 +332,13 @@ pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
     apply_extra_keys(&repo.root, profile)
 }
 
-/// Multi-valued local key listing the `[profiles.git]` keys gitenv wrote.
 const MANAGED: &str = "gitenv.managed";
-/// Multi-valued local key holding `key\nvalue` for each value the user had
-/// set themselves before gitenv overwrote it; neither part can contain a
-/// newline, git stores it escaped.
 const BACKUP: &str = "gitenv.backup";
 
-/// Write the profile's `[profiles.git]` keys. Keys an earlier profile
-/// wrote and this one does not set are removed, and any value the user
-/// had there before gitenv first wrote the key is put back.
+/// Writes the profile's `[profiles.git]` keys. The keys gitenv wrote are listed
+/// in the multi-valued `gitenv.managed`; those the new profile does not set are
+/// removed, and any value the user had there first, kept in `gitenv.backup` as
+/// `key\nvalue`, is put back.
 fn apply_extra_keys(root: &Path, profile: &Profile) -> Result<()> {
     let wanted: Vec<String> = profile.git.keys().map(|k| normalize_key(k)).collect();
     let managed: Vec<String> = config_get_all(root, MANAGED)
@@ -372,7 +360,6 @@ fn apply_extra_keys(root: &Path, profile: &Profile) -> Result<()> {
         }
         backups.retain(|(k, _)| k != key);
     }
-    // Keys gitenv is about to take over: keep what the user had.
     for key in wanted.iter().filter(|k| !managed.contains(k)) {
         for value in config_get_all(root, key) {
             backups.push((key.clone(), value));
@@ -391,9 +378,9 @@ fn apply_extra_keys(root: &Path, profile: &Profile) -> Result<()> {
     Ok(())
 }
 
-/// The `core.sshCommand` value that makes git offer `key` and nothing else.
-/// The path is single-quoted so spaces survive, and a leading `~` is
-/// expanded here because quoting stops the shell from doing it.
+/// The `core.sshCommand` that makes git offer `key` and nothing else. The path
+/// is single-quoted for the shell git runs it through, and a leading `~` is
+/// expanded here because the quotes stop the shell from doing it.
 pub fn ssh_command(key: &Path) -> String {
     let path = expand_tilde(key).display().to_string();
     format!("ssh -i {} -o IdentitiesOnly=yes", shell_quote(&path))
@@ -409,12 +396,10 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
     }
 }
 
-/// Quote for POSIX `sh`, which is what git runs `core.sshCommand` through.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// A key set several times keeps its last value, as `git config --get` would.
 fn read_identity(root: &Path, scope: &[&str]) -> Identity {
     identity_from(
         config_list(root, scope)
@@ -437,8 +422,9 @@ fn identity_from(settings: BTreeMap<String, String>) -> Identity {
     }
 }
 
-/// `(scope, key, value)` per entry, in the order git reads them. The scope
-/// is empty unless `--show-scope` is among `args`.
+/// `(scope, key, value)` per entry, in the order git reads them. `-z` gives
+/// `key\nvalue\0` per entry, preceded by `scope\0` with `--show-scope`; a key
+/// without `=` has no newline.
 fn config_list(root: &Path, args: &[&str]) -> Vec<(String, String, String)> {
     let output = Command::new("git")
         .arg("-C")
@@ -457,8 +443,6 @@ fn config_list(root: &Path, args: &[&str]) -> Vec<(String, String, String)> {
     let mut fields = text.split('\0').filter(|f| !f.is_empty());
     let with_scope = args.contains(&"--show-scope");
     let mut entries = Vec::new();
-    // `-z` gives `key\nvalue\0` per entry, preceded by `scope\0` with
-    // `--show-scope`; a key without `=` has no newline.
     while let Some(first) = fields.next() {
         let (scope, entry) = if with_scope {
             match fields.next() {
@@ -503,6 +487,8 @@ fn config_set(root: &Path, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Every local value of `key`. Each ends in `\0`, and an empty one is kept: an
+/// empty credential.helper, for one, clears inherited helpers.
 fn config_get_all(root: &Path, key: &str) -> Vec<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -510,9 +496,6 @@ fn config_get_all(root: &Path, key: &str) -> Vec<String> {
         .args(["config", "--local", "--get-all", "-z", key])
         .output();
     match output {
-        // Each value ends in `\0`; an empty value is meaningful (an empty
-        // credential.helper clears inherited ones), so only the final
-        // terminator is dropped.
         Ok(output) if output.status.success() && !output.stdout.is_empty() => {
             let text = String::from_utf8_lossy(&output.stdout);
             text.strip_suffix('\0')
@@ -552,7 +535,6 @@ fn config_unset_all(root: &Path, key: &str) -> Result<()> {
 }
 
 fn config_unset(root: &Path, key: &str) -> Result<()> {
-    // Exit code 5 means "key was not set", which is fine for us.
     let status = Command::new("git")
         .arg("-C")
         .arg(root)
@@ -678,8 +660,6 @@ mod tests {
             Some("ssh -i '/tmp/id_test' -o IdentitiesOnly=yes")
         );
 
-        // Switching keeps a shared extra key and drops one the new profile
-        // does not have; a key the user set by hand is left alone.
         p.git.insert("pull.rebase".into(), "true".into());
         apply(&repo, &p).unwrap();
         assert!(
@@ -814,7 +794,6 @@ mod tests {
         id.sign_commits = Some(true);
         assert!(id.matches(&p));
 
-        // A profile asking for openpgp is satisfied by git's default.
         p.signing_format = Some(SigningFormat::Openpgp);
         id.signing_format = None;
         assert!(id.matches(&p));
@@ -971,7 +950,6 @@ mod tests {
             "multi-valued key replaced"
         );
 
-        // Re-applying the same profile must not back up its own values.
         apply(&repo, &acme).unwrap();
         apply(&repo, &profile(None)).unwrap();
         assert_eq!(all("pull.rebase"), vec!["false"]);

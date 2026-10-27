@@ -1,5 +1,3 @@
-//! Non-interactive subcommands: `apply` and `status`.
-
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -246,7 +244,6 @@ mod tests {
             },
         ];
         let text = long_status(&config, &repo, &check::verdict(&config, &repo));
-        // The rule says 'acme', so the 7 personal commits are the odd ones.
         assert!(
             text.contains(
                 "history      7 of the last 10 commits by another email: ada@example.com (7)"

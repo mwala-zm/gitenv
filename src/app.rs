@@ -19,7 +19,6 @@ pub enum Mode {
     Scan(Box<ScanView>),
 }
 
-/// Every repository under a directory, as `gitenv scan` lists them.
 #[derive(Debug, Clone)]
 pub struct ScanView {
     pub root: PathBuf,
@@ -35,20 +34,19 @@ pub struct App {
     pub status: Option<String>,
     pub mode: Mode,
     pub should_quit: bool,
-    /// Where `s` looks for repositories.
     pub scan_root: PathBuf,
-    /// The config file as last read or written, to notice edits made
-    /// elsewhere while the TUI is open.
     pub config_text: Option<String>,
 }
 
 impl App {
+    /// Loads the profiles and the repository containing `dir`. On first run it
+    /// seeds a profile from the global git identity and writes the file,
+    /// showing rather than failing on a write error. Started outside a
+    /// repository, it opens on the scan of `dir`.
     pub fn new(dir: &Path) -> Result<Self> {
         let config_path = Config::path()?;
         let mut config = Config::load(&config_path)?;
 
-        // First run: seed a profile from the global git identity so the
-        // screen is not empty, and write the file so the user can edit it.
         let mut status = None;
         if config.profiles.is_empty() && !config_path.exists() {
             let global = git::global_identity();
@@ -60,7 +58,6 @@ impl App {
                     signing_key: global.signing_key,
                     ..Default::default()
                 });
-                // Not fatal: the profile is still usable for this session.
                 if let Err(err) = config.save(&config_path) {
                     status = Some(format!(
                         "Could not create {}: {}",
@@ -91,7 +88,6 @@ impl App {
             config_text,
         };
         app.select_active();
-        // `gitenv ~/work` on a folder of clones opens on the list of them.
         if started_outside {
             let status = app.status.take();
             app.open_scan();
@@ -110,8 +106,6 @@ impl App {
         rules::expected(&self.config, repo)
     }
 
-    /// The email recent commits ought to carry: the expected profile's when
-    /// a rule claims this repo, otherwise whatever git would use now.
     pub fn reference_email(&self) -> Option<&str> {
         match self.expected_profile() {
             Some((p, _)) => Some(p.email.as_str()),
@@ -174,6 +168,8 @@ impl App {
         }
     }
 
+    /// Keys in the profile form. Ctrl and Alt chords arrive as characters with
+    /// a modifier and are shortcuts, never typed into the field.
     fn handle_edit_key(&mut self, key: KeyEvent) {
         let Mode::Edit(form) = &mut self.mode else {
             return;
@@ -193,8 +189,6 @@ impl App {
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => form.kill_to_start(),
             (KeyCode::Char('k'), KeyModifiers::CONTROL) => form.kill_to_end(),
             (KeyCode::Char('w'), KeyModifiers::CONTROL) => form.kill_word(),
-            // Ctrl+A and friends arrive as Char('a') with a modifier; they
-            // are shortcuts, not text.
             (KeyCode::Char(c), m)
                 if !m.intersects(
                     KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
@@ -221,9 +215,9 @@ impl App {
         }
     }
 
-    /// Write `config` and only then make it the one shown, so a failed
-    /// save leaves nothing on screen that is not on disk. Refuses when the
-    /// file was changed by something else since gitenv read it.
+    /// Writes `config` and only then shows it, so a failed save leaves nothing
+    /// on screen that is not on disk. Refuses when something else changed the
+    /// file since gitenv read it.
     fn save_config(&mut self, config: Config) -> Result<(), String> {
         let on_disk = std::fs::read_to_string(&self.config_path).ok();
         if on_disk != self.config_text {
@@ -281,7 +275,6 @@ impl App {
         Ok(())
     }
 
-    /// Repos the profile was applied to keep their `.git/config` as it is.
     fn delete_selected(&mut self) {
         if self.selected >= self.config.profiles.len() {
             return;
@@ -403,7 +396,6 @@ impl App {
         }
     }
 
-    /// Keep `gitenv export`'s files in step; a suffix for the status line.
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -447,8 +439,6 @@ impl App {
         }
     }
 
-    /// Prefer the rule-claimed profile over the active one, so that on a
-    /// violation Enter is the fix.
     fn select_active(&mut self) {
         let target = self
             .expected_profile()
@@ -466,7 +456,6 @@ impl App {
 mod tests {
     use super::*;
 
-    /// `tag` keeps each test on its own file; tests run in parallel.
     fn app_with(tag: &str, profiles: Vec<Profile>) -> App {
         App {
             config: Config { profiles },
@@ -508,7 +497,6 @@ mod tests {
             local: Default::default(),
             authors: Vec::new(),
         });
-        // Identity is 'personal' (index 0) but the rule says 'acme'.
         app.select_active();
         assert_eq!(app.selected, 1);
         assert_eq!(
@@ -647,7 +635,6 @@ mod tests {
     #[test]
     fn a_failed_save_changes_nothing_on_screen() {
         let mut app = app_with("failsave", vec![profile("a")]);
-        // A directory where the file should be makes every write fail.
         std::fs::create_dir_all(&app.config_path).unwrap();
         app.config_text = std::fs::read_to_string(&app.config_path).ok();
         assert!(app.save_profile(None, profile("b")).is_err());

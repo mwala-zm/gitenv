@@ -1,9 +1,3 @@
-//! The `doctor` subcommand: check that each profile would actually work,
-//! not just that a repo carries its name and email. Key files exist, the
-//! signing key is one gpg or ssh can use, and, unless offline, the SSH key
-//! logs in to each host the profile's remote rules name, as the account
-//! the host reports.
-
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
@@ -45,7 +39,6 @@ fn fail(message: impl Into<String>) -> Finding {
     }
 }
 
-/// Problems across profiles: ones gitenv would trip over when matching.
 pub fn config_findings(config: &Config) -> Vec<Finding> {
     let mut out = Vec::new();
     let profiles = &config.profiles;
@@ -84,11 +77,8 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
     out
 }
 
-/// What `probe` reports for `ssh -T` against a host: the first line the
-/// host printed, or why it could not log in.
 pub type Probe<'a> = &'a dyn Fn(&Path, &str) -> Result<String, String>;
 
-/// Checks for one profile. `probe` is `None` offline.
 pub fn profile_findings(profile: &Profile, probe: Option<Probe>) -> Vec<Finding> {
     let mut out = Vec::new();
     let ssh_key = profile.ssh_key.as_deref().map(git::expand_tilde);
@@ -156,7 +146,6 @@ fn gpg_key(key: &str) -> Finding {
     }
 }
 
-/// Hosts named without wildcards in the profile's remote rules.
 fn hosts(profile: &Profile) -> Vec<String> {
     let mut hosts: Vec<String> = profile
         .remotes
@@ -172,8 +161,9 @@ fn hosts(profile: &Profile) -> Vec<String> {
     hosts
 }
 
-/// `ssh -T git@host` with only `key`, never prompting. Hosting services
-/// refuse a shell but greet the account the key belongs to first.
+/// Runs `ssh -T git@host` offering only `key`, in batch mode so it never
+/// prompts. Hosting services refuse a shell but first greet the account the key
+/// belongs to; returns that greeting, or why the login failed.
 pub fn ssh_probe(key: &Path, host: &str) -> Result<String, String> {
     let output = Command::new("ssh")
         .arg("-i")

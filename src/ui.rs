@@ -68,7 +68,6 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{word:<6}"), Style::new().fg(colour)),
                 Span::raw(format!("{:<width$}  ", row.profile_column())),
-                // The title names the root, so paths below it are shown short.
                 Span::styled(
                     match row.repo.root.strip_prefix(&view.root) {
                         Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
@@ -169,8 +168,6 @@ fn render_confirm_delete(frame: &mut Frame, app: &App) {
 fn render_form(frame: &mut Frame, form: &Form) {
     let label_width = LABEL_WIDTH;
     let area = centered(frame.area(), 78, LABELS.len() as u16 + 4);
-    // Columns left for the value: inside the borders, after the label, and
-    // one spare cell so the cursor never lands on the right border.
     let value_width = (area.width as usize).saturating_sub(2 + label_width + 1);
 
     let mut lines: Vec<Line> = LABELS
@@ -210,12 +207,9 @@ fn render_form(frame: &mut Frame, form: &Form) {
     }
 }
 
-/// How many characters to hide on the left so a cursor at `cursor` fits in
-/// `width` columns with one spare cell for the cursor itself.
-/// The part of `value` that fits in `width` columns, scrolled so the
-/// cursor (a character index, if this field has it) stays visible with a
-/// spare cell, and the cursor's column within it. Wide characters such as
-/// CJK take two columns.
+/// The part of `value` that fits in `width` columns, scrolled so the cursor (a
+/// character index, if this field has it) stays in view with a spare cell, and
+/// the cursor's column within it. Wide characters such as CJK take two columns.
 fn visible(value: &str, cursor: Option<usize>, width: usize) -> (String, usize) {
     let chars: Vec<char> = value.chars().collect();
     let cols = |cs: &[char]| -> usize { cs.iter().map(|c| c.width().unwrap_or(0)).sum() };
@@ -318,7 +312,6 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
         .wrap(Wrap { trim: false })
         .block(block);
         frame.render_widget(hint, area);
-        // The hint is nine lines; allow two more for the path wrapping.
         render_wordmark(frame, inner, 11);
         return;
     }
@@ -507,10 +500,6 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 #[cfg(test)]
 mod tests {
-    //! Snapshot tests: render each screen into a fake terminal and compare
-    //! with the files in `src/snapshots/`. After an intended visual change,
-    //! run `cargo insta review` (or `INSTA_UPDATE=always cargo test`).
-
     use super::*;
     use crate::git::{Author, Identity, Repo};
     use crate::profile::{Config, Profile};

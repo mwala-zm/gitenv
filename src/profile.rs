@@ -36,8 +36,6 @@ impl SigningFormat {
     }
 }
 
-/// Unknown keys are an error, so a typo such as `remote = [...]` is
-/// reported instead of silently switching a rule off.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -48,12 +46,10 @@ pub struct Profile {
     pub signing_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_key: Option<PathBuf>,
-    /// With `ssh`, `signing_key` is the path to a public key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_format: Option<SigningFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sign_commits: Option<bool>,
-    /// Checked when matching, but never removed by applying another profile.
     #[serde(
         default,
         deserialize_with = "git_settings",
@@ -66,9 +62,9 @@ pub struct Profile {
     pub paths: Vec<String>,
 }
 
-/// `[profiles.git]` keys may be written as TOML dotted keys
-/// (`pull.rebase = true`), which arrive as nested tables; join them back
-/// into git's `section.key` and accept plain booleans and numbers.
+/// `[profiles.git]` keys may be written as TOML dotted keys (`pull.rebase =
+/// true`), which arrive as nested tables; they are joined back into git's
+/// `section.key`, and plain booleans and numbers are accepted as values.
 fn git_settings<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<BTreeMap<String, String>, D::Error> {
@@ -110,7 +106,6 @@ pub struct Config {
 }
 
 impl Profile {
-    /// How many settings beyond name and email the profile fixes.
     fn pinned(&self) -> usize {
         usize::from(self.signing_key.is_some())
             + usize::from(self.ssh_key.is_some())
@@ -121,11 +116,8 @@ impl Profile {
 }
 
 impl Config {
-    /// `~/Library/Application Support/gitenv/config.toml` on macOS,
-    /// `~/.config/gitenv/config.toml` on Linux, unless `GITENV_CONFIG` is set.
     pub fn path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
-            // Absolute, so files written next to it can name it from anywhere.
             let path = PathBuf::from(path);
             return Ok(if path.is_absolute() {
                 path
@@ -140,7 +132,6 @@ impl Config {
         Ok(dirs.config_dir().join("config.toml"))
     }
 
-    /// A missing file is not an error: the UI tells you where to create one.
     pub fn load(path: &PathBuf) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -152,11 +143,10 @@ impl Config {
         Ok(config)
     }
 
-    /// Edits the existing file in place where it can, so comments and
-    /// layout around profiles that did not change survive a save. The file
-    /// is replaced atomically and keeps its permissions and line endings; a
-    /// symlinked config, even one whose target does not exist yet, is
-    /// written through rather than replaced.
+    /// Edits the existing file in place where it can, so comments and layout
+    /// around unchanged profiles survive. The file is replaced atomically,
+    /// keeping its permissions and line endings, and a symlinked config is
+    /// written through, even one whose target does not exist yet.
     pub fn save(&self, path: &Path) -> Result<()> {
         let path = write_target(path);
         if let Some(parent) = path.parent() {
@@ -198,6 +188,10 @@ impl Config {
         Ok(())
     }
 
+    /// The profile the identity is on. When several match, the one that pins
+    /// the most settings wins, so a repo set up with a signing profile is not
+    /// reported as a plainer one with the same name and email; ties go to file
+    /// order.
     pub fn matching(&self, identity: &crate::git::Identity) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -207,8 +201,8 @@ impl Config {
     }
 }
 
-/// The file a save should write: `path` with symlinks followed, including
-/// a dangling one, so a dotfiles link made before its target keeps working.
+/// `path` with symlinks followed, a dangling one too, so a dotfiles link made
+/// before its target keeps working.
 fn write_target(path: &Path) -> PathBuf {
     if let Ok(real) = fs::canonicalize(path) {
         return real;
@@ -226,9 +220,11 @@ fn write_target(path: &Path) -> PathBuf {
     target
 }
 
-/// Bring `doc` in line with `fresh`, keeping `doc`'s formatting wherever
-/// the content is unchanged. Profiles are paired by name, then a renamed
-/// one by position.
+/// Brings `doc` in line with `fresh`, keeping `doc`'s formatting wherever the
+/// content is unchanged. Each new profile is paired with the old table it came
+/// from: exact copies first, so deleting one of two same-named profiles keeps
+/// the right comments, then by name, then a renamed one by position. An
+/// unchanged `git` table keeps its own layout, inline or dotted.
 fn merge_document(doc: &mut DocumentMut, fresh: &DocumentMut) {
     let Some(new) = fresh.get("profiles").and_then(Item::as_array_of_tables) else {
         doc.remove("profiles");
@@ -243,12 +239,8 @@ fn merge_document(doc: &mut DocumentMut, fresh: &DocumentMut) {
     let new: Vec<&Table> = new.iter().collect();
     let name = |t: &Table| t.get("name").and_then(Item::as_str).map(str::to_owned);
 
-    // Pair each new profile with the old table it came from: first exact
-    // copies (so deleting one of two same-named profiles keeps the right
-    // comments), then by name, then a renamed one by position.
     let mut pair: Vec<Option<usize>> = vec![None; new.len()];
     let mut used = vec![false; old.len()];
-    /// Whether old table `o` (at `j`) can pair with new table `n` (at `i`).
     type Pass<'a> = &'a dyn Fn(&Table, &Table, usize, usize) -> bool;
     let passes: [Pass; 3] = [
         &|o, n, _, _| name(o).is_some() && name(o) == name(n) && same_profile(o, n),
@@ -275,8 +267,6 @@ fn merge_document(doc: &mut DocumentMut, fresh: &DocumentMut) {
                 let mut kept = old_table.clone();
                 let old_git = kept.get("git").cloned();
                 merge_table(&mut kept, table);
-                // An unchanged `git` table keeps its own layout, inline or
-                // dotted, rather than the serialiser's.
                 if let (Some(old_git), Some(new_git)) = (old_git, table.get("git"))
                     && same_git(&old_git, new_git)
                 {
@@ -315,8 +305,6 @@ fn merge_table(old: &mut Table, new: &Table) {
     }
 }
 
-/// Equal once read as profiles, so `pull.rebase = true` and
-/// `"pull.rebase" = "true"` are the same.
 fn same_profile(a: &Table, b: &Table) -> bool {
     let read = |t: &Table| {
         let mut doc = DocumentMut::new();
@@ -326,7 +314,6 @@ fn same_profile(a: &Table, b: &Table) -> bool {
     read(a).is_some() && read(a) == read(b)
 }
 
-/// Equal once read as `[profiles.git]` settings.
 fn same_git(a: &Item, b: &Item) -> bool {
     #[derive(Deserialize, PartialEq)]
     struct GitOnly {
@@ -343,7 +330,6 @@ fn same_git(a: &Item, b: &Item) -> bool {
     read(a).is_some() && read(a) == read(b)
 }
 
-/// Equal as data, however each side is laid out.
 fn same_value(a: &Value, b: &Value) -> bool {
     let data = |v: &Value| {
         let mut v = v.clone();
@@ -490,7 +476,6 @@ email = "ada@old.example"
         config.save(&path).unwrap();
         assert_eq!(Config::load(&path).unwrap(), config);
 
-        // A config symlinked from a dotfiles repo stays a symlink.
         #[cfg(unix)]
         {
             let link = temp_config("link");
