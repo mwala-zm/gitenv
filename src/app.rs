@@ -37,6 +37,9 @@ pub struct App {
     pub should_quit: bool,
     /// Where `s` looks for repositories.
     pub scan_root: PathBuf,
+    /// The config file as last read or written, to notice edits made
+    /// elsewhere while the TUI is open.
+    pub config_text: Option<String>,
 }
 
 impl App {
@@ -46,6 +49,7 @@ impl App {
 
         // First run: seed a profile from the global git identity so the
         // screen is not empty, and write the file so the user can edit it.
+        let mut status = None;
         if config.profiles.is_empty() && !config_path.exists() {
             let global = git::global_identity();
             if let (Some(user_name), Some(email)) = (global.name, global.email) {
@@ -56,9 +60,17 @@ impl App {
                     signing_key: global.signing_key,
                     ..Default::default()
                 });
-                config.save(&config_path)?;
+                // Not fatal: the profile is still usable for this session.
+                if let Err(err) = config.save(&config_path) {
+                    status = Some(format!(
+                        "Could not create {}: {}",
+                        config_path.display(),
+                        err.root_cause()
+                    ));
+                }
             }
         }
+        let config_text = std::fs::read_to_string(&config_path).ok();
 
         let repo = git::discover(dir)?;
         let scan_root = match &repo {
@@ -72,16 +84,18 @@ impl App {
             config_path,
             repo,
             selected: 0,
-            status: None,
+            status,
             mode: Mode::Normal,
             should_quit: false,
             scan_root,
+            config_text,
         };
         app.select_active();
         // `gitenv ~/work` on a folder of clones opens on the list of them.
         if started_outside {
+            let status = app.status.take();
             app.open_scan();
-            app.status = None;
+            app.status = status;
         }
         Ok(app)
     }
@@ -126,7 +140,10 @@ impl App {
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.move_selection(1),
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => self.move_selection(-1),
             (KeyCode::Enter, _) => self.apply_selected(),
-            (KeyCode::Char('r'), _) => self.refresh(),
+            (KeyCode::Char('r'), _) => {
+                self.reload_config();
+                self.refresh();
+            }
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
@@ -204,6 +221,39 @@ impl App {
         }
     }
 
+    /// Write `config` and only then make it the one shown, so a failed
+    /// save leaves nothing on screen that is not on disk. Refuses when the
+    /// file was changed by something else since gitenv read it.
+    fn save_config(&mut self, config: Config) -> Result<(), String> {
+        let on_disk = std::fs::read_to_string(&self.config_path).ok();
+        if on_disk != self.config_text {
+            return Err(
+                "The config file changed on disk since gitenv read it; nothing was saved. \
+                 Press Esc, then r to reload it"
+                    .into(),
+            );
+        }
+        config
+            .save(&self.config_path)
+            .map_err(|e| format!("Could not save config: {}", e.root_cause()))?;
+        self.config = config;
+        self.config_text = std::fs::read_to_string(&self.config_path).ok();
+        Ok(())
+    }
+
+    fn reload_config(&mut self) {
+        match Config::load(&self.config_path) {
+            Ok(config) => {
+                self.config = config;
+                self.config_text = std::fs::read_to_string(&self.config_path).ok();
+                self.selected = self
+                    .selected
+                    .min(self.config.profiles.len().saturating_sub(1));
+            }
+            Err(err) => self.status = Some(format!("Could not read config: {err:#}")),
+        }
+    }
+
     fn save_profile(&mut self, target: Option<usize>, profile: Profile) -> Result<(), String> {
         let clash = self
             .config
@@ -216,17 +266,17 @@ impl App {
         }
 
         let name = profile.name.clone();
+        let mut config = self.config.clone();
+        let mut selected = self.selected;
         match target {
-            Some(i) if i < self.config.profiles.len() => self.config.profiles[i] = profile,
+            Some(i) if i < config.profiles.len() => config.profiles[i] = profile,
             _ => {
-                self.config.profiles.push(profile);
-                self.selected = self.config.profiles.len() - 1;
+                config.profiles.push(profile);
+                selected = config.profiles.len() - 1;
             }
         }
-
-        self.config
-            .save(&self.config_path)
-            .map_err(|e| format!("Could not save config: {e}"))?;
+        self.save_config(config)?;
+        self.selected = selected;
         self.status = Some(format!("Saved profile '{name}'{}", self.refresh_export()));
         Ok(())
     }
@@ -236,17 +286,20 @@ impl App {
         if self.selected >= self.config.profiles.len() {
             return;
         }
-        let removed = self.config.profiles.remove(self.selected);
-        self.selected = self
-            .selected
-            .min(self.config.profiles.len().saturating_sub(1));
-        self.status = Some(match self.config.save(&self.config_path) {
-            Ok(()) => format!(
-                "Deleted profile '{}'{}",
-                removed.name,
-                self.refresh_export()
-            ),
-            Err(e) => format!("Could not save config: {e}"),
+        let mut config = self.config.clone();
+        let removed = config.profiles.remove(self.selected);
+        self.status = Some(match self.save_config(config) {
+            Ok(()) => {
+                self.selected = self
+                    .selected
+                    .min(self.config.profiles.len().saturating_sub(1));
+                format!(
+                    "Deleted profile '{}'{}",
+                    removed.name,
+                    self.refresh_export()
+                )
+            }
+            Err(e) => e,
         });
     }
 
@@ -425,6 +478,7 @@ mod tests {
             mode: Mode::Normal,
             should_quit: false,
             scan_root: std::env::temp_dir(),
+            config_text: None,
         }
     }
 
@@ -588,5 +642,44 @@ mod tests {
         assert_eq!(app.repo.as_ref().unwrap().root.file_name().unwrap(), "toy");
         assert_eq!(app.active_profile().unwrap().name, "personal");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_failed_save_changes_nothing_on_screen() {
+        let mut app = app_with("failsave", vec![profile("a")]);
+        // A directory where the file should be makes every write fail.
+        std::fs::create_dir_all(&app.config_path).unwrap();
+        app.config_text = std::fs::read_to_string(&app.config_path).ok();
+        assert!(app.save_profile(None, profile("b")).is_err());
+        assert_eq!(app.config.profiles.len(), 1);
+        app.delete_selected();
+        assert_eq!(app.config.profiles.len(), 1);
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Could not save config")
+        );
+        std::fs::remove_dir_all(&app.config_path).unwrap();
+    }
+
+    #[test]
+    fn edits_made_elsewhere_are_not_overwritten() {
+        let mut app = app_with("elsewhere", vec![profile("a")]);
+        app.save_profile(Some(0), profile("a")).unwrap();
+        let mut text = std::fs::read_to_string(&app.config_path).unwrap();
+        text.push_str("\n# added in my editor\n[[profiles]]\nname = \"client\"\nuser_name = \"C\"\nemail = \"c@x\"\n");
+        std::fs::write(&app.config_path, &text).unwrap();
+
+        let err = app.save_profile(None, profile("b")).unwrap_err();
+        assert!(err.contains("changed on disk"), "{err}");
+        assert_eq!(std::fs::read_to_string(&app.config_path).unwrap(), text);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(app.config.profiles.len(), 2);
+        app.save_profile(None, profile("b")).unwrap();
+        let saved = std::fs::read_to_string(&app.config_path).unwrap();
+        assert!(saved.contains("# added in my editor") && saved.contains("name = \"b\""));
+        std::fs::remove_file(&app.config_path).ok();
     }
 }

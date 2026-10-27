@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, Mode, ScanView};
 use crate::form::{Form, LABEL_WIDTH, LABELS};
@@ -182,14 +183,10 @@ fn render_form(frame: &mut Frame, form: &Form) {
             } else {
                 Style::new()
             };
-            let offset = if i == form.field {
-                scroll_offset(form.cursor, value_width)
-            } else {
-                0
-            };
+            let cursor = (i == form.field).then_some(form.cursor);
             Line::from(vec![
                 Span::styled(format!("{label:<label_width$}"), style),
-                Span::raw(window(value, offset, value_width)),
+                Span::raw(visible(value, cursor, value_width).0),
             ])
         })
         .collect();
@@ -205,8 +202,8 @@ fn render_form(frame: &mut Frame, form: &Form) {
         area,
     );
 
-    let offset = scroll_offset(form.cursor, value_width);
-    let x = area.x + 1 + label_width as u16 + (form.cursor - offset) as u16;
+    let (_, column) = visible(&form.values[form.field], Some(form.cursor), value_width);
+    let x = area.x + 1 + label_width as u16 + column as u16;
     let y = area.y + 1 + form.field as u16;
     if x < area.right() {
         frame.set_cursor_position((x, y));
@@ -215,15 +212,32 @@ fn render_form(frame: &mut Frame, form: &Form) {
 
 /// How many characters to hide on the left so a cursor at `cursor` fits in
 /// `width` columns with one spare cell for the cursor itself.
-fn scroll_offset(cursor: usize, width: usize) -> usize {
-    if width == 0 {
-        return cursor;
+/// The part of `value` that fits in `width` columns, scrolled so the
+/// cursor (a character index, if this field has it) stays visible with a
+/// spare cell, and the cursor's column within it. Wide characters such as
+/// CJK take two columns.
+fn visible(value: &str, cursor: Option<usize>, width: usize) -> (String, usize) {
+    let chars: Vec<char> = value.chars().collect();
+    let cols = |cs: &[char]| -> usize { cs.iter().map(|c| c.width().unwrap_or(0)).sum() };
+    let cursor = cursor.map(|c| c.min(chars.len()));
+    let mut offset = 0;
+    if let Some(cursor) = cursor {
+        while offset < cursor && cols(&chars[offset..cursor]) + 1 > width {
+            offset += 1;
+        }
     }
-    cursor.saturating_sub(width - 1)
-}
-
-fn window(s: &str, offset: usize, width: usize) -> String {
-    s.chars().skip(offset).take(width).collect()
+    let mut shown = String::new();
+    let mut used = 0;
+    for &c in &chars[offset..] {
+        let w = c.width().unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        used += w;
+        shown.push(c);
+    }
+    let column = cursor.map_or(0, |cursor| cols(&chars[offset..cursor]));
+    (shown, column)
 }
 
 fn render_header(frame: &mut Frame, area: Rect) {
@@ -557,6 +571,7 @@ mod tests {
             mode: Mode::Normal,
             should_quit: false,
             scan_root: "/home/ada/work".into(),
+            config_text: None,
         }
     }
 
@@ -659,5 +674,15 @@ mod tests {
             selected: 1,
         }));
         insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn wide_characters_keep_the_cursor_in_view() {
+        let value = "日本語".repeat(8);
+        let (shown, column) = visible(&value, Some(24), 40);
+        assert_eq!(column, 39 - 1, "two columns per character, one cell spare");
+        assert!(shown.chars().map(|c| c.width().unwrap()).sum::<usize>() <= 40);
+        let (shown, column) = visible("abc", Some(1), 40);
+        assert_eq!((shown.as_str(), column), ("abc", 1));
     }
 }

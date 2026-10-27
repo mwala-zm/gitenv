@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::git::git_bool;
+use crate::git::{self, git_bool};
 use crate::profile::{Profile, SigningFormat};
 use crate::rules;
 
@@ -212,12 +212,12 @@ impl Form {
             None => None,
         };
         let mut git = BTreeMap::new();
-        for pair in list(&extra) {
+        for pair in split_pairs(&extra) {
             let Some((k, v)) = pair.split_once('=') else {
                 return Err(format!("Extra git config needs key=value, not '{pair}'"));
             };
             let k = k.trim();
-            if k.is_empty() || !k.contains('.') {
+            if !git::valid_key(k) {
                 return Err(format!("'{k}' is not a git config key like section.name"));
             }
             git.insert(k.to_string(), v.trim().to_string());
@@ -241,6 +241,25 @@ impl Form {
             paths,
         })
     }
+}
+
+/// Split `k=v, k2=v2` only at commas that start another `key=`, so a value
+/// may itself contain commas, as in `alias.lg=log --format=%h,%s`.
+fn split_pairs(s: &str) -> Vec<String> {
+    let mut pairs = Vec::new();
+    let mut start = 0;
+    for (i, _) in s.match_indices(',') {
+        let starts_pair = s[i + 1..]
+            .split_once('=')
+            .is_some_and(|(key, _)| git::valid_key(key.trim()));
+        if starts_pair {
+            pairs.push(s[start..i].trim().to_string());
+            start = i + 1;
+        }
+    }
+    pairs.push(s[start..].trim().to_string());
+    pairs.retain(|p| !p.is_empty());
+    pairs
 }
 
 fn is_boundary(c: char) -> bool {
@@ -405,5 +424,18 @@ mod tests {
         form.values[2] = "ada@acme.example".into();
         form.values[7] = "[oops".into();
         assert!(form.to_profile().unwrap_err().contains("Bad pattern"));
+    }
+
+    #[test]
+    fn extra_config_values_may_contain_commas() {
+        let mut form = typed("p");
+        form.values[1] = "Ada".into();
+        form.values[2] = "ada@example.com".into();
+        form.values[9] = "alias.lg=log --format=%h,%s, pull.rebase=true".into();
+        let profile = form.to_profile().unwrap();
+        assert_eq!(profile.git["alias.lg"], "log --format=%h,%s");
+        assert_eq!(profile.git["pull.rebase"], "true");
+        let again = Form::edit(0, &profile).to_profile().unwrap();
+        assert_eq!(again, profile);
     }
 }

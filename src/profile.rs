@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
@@ -36,7 +36,10 @@ impl SigningFormat {
     }
 }
 
+/// Unknown keys are an error, so a typo such as `remote = [...]` is
+/// reported instead of silently switching a rule off.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub name: String,
     pub user_name: String,
@@ -122,7 +125,15 @@ impl Config {
     /// `~/.config/gitenv/config.toml` on Linux, unless `GITENV_CONFIG` is set.
     pub fn path() -> Result<PathBuf> {
         if let Some(path) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
-            return Ok(PathBuf::from(path));
+            // Absolute, so files written next to it can name it from anywhere.
+            let path = PathBuf::from(path);
+            return Ok(if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .context("reading current directory")?
+                    .join(path)
+            });
         }
         let dirs = ProjectDirs::from("", "", "gitenv")
             .context("could not determine a config directory for this user")?;
@@ -143,18 +154,25 @@ impl Config {
 
     /// Edits the existing file in place where it can, so comments and
     /// layout around profiles that did not change survive a save. The file
-    /// is replaced atomically, and a symlinked config is written through.
-    pub fn save(&self, path: &PathBuf) -> Result<()> {
-        let path = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    /// is replaced atomically and keeps its permissions and line endings; a
+    /// symlinked config, even one whose target does not exist yet, is
+    /// written through rather than replaced.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let path = write_target(path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        let permissions = fs::metadata(&path).ok().map(|m| m.permissions());
+        if permissions.as_ref().is_some_and(fs::Permissions::readonly) {
+            bail!("{} is read-only", path.display());
         }
         let fresh: DocumentMut = toml::to_string_pretty(self)
             .context("serialising config")?
             .parse()
             .context("re-reading serialised config")?;
-        let text = match fs::read_to_string(&path)
-            .ok()
+        let existing = fs::read_to_string(&path).ok();
+        let text = match existing
+            .as_deref()
             .and_then(|old| old.parse::<DocumentMut>().ok())
         {
             Some(mut doc) => {
@@ -163,16 +181,23 @@ impl Config {
             }
             None => fresh.to_string(),
         };
+        let text = if existing.as_deref().is_some_and(|t| t.contains("\r\n")) {
+            text.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            text
+        };
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))?;
+        if let Some(permissions) = permissions {
+            fs::set_permissions(&tmp, permissions).ok();
+        }
+        if let Err(err) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err).with_context(|| format!("replacing {}", path.display()));
+        }
         Ok(())
     }
 
-    /// The profile the identity is on. When several match, the one that
-    /// pins the most settings wins, so a repo set up with a signing profile
-    /// is not reported as a plainer profile with the same name and email;
-    /// ties go to file order.
     pub fn matching(&self, identity: &crate::git::Identity) -> Option<&Profile> {
         self.profiles
             .iter()
@@ -180,6 +205,25 @@ impl Config {
             .filter(|p| identity.matches(p))
             .max_by_key(|p| p.pinned())
     }
+}
+
+/// The file a save should write: `path` with symlinks followed, including
+/// a dangling one, so a dotfiles link made before its target keeps working.
+fn write_target(path: &Path) -> PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut target = path.to_path_buf();
+    for _ in 0..40 {
+        let Ok(next) = fs::read_link(&target) else {
+            break;
+        };
+        target = match target.parent() {
+            Some(parent) if next.is_relative() => parent.join(next),
+            _ => next,
+        };
+    }
+    target
 }
 
 /// Bring `doc` in line with `fresh`, keeping `doc`'s formatting wherever
@@ -195,22 +239,52 @@ fn merge_document(doc: &mut DocumentMut, fresh: &DocumentMut) {
         .and_then(Item::as_array_of_tables)
         .cloned()
         .unwrap_or_default();
+    let old: Vec<&Table> = old.iter().collect();
+    let new: Vec<&Table> = new.iter().collect();
     let name = |t: &Table| t.get("name").and_then(Item::as_str).map(str::to_owned);
-    let new_names: Vec<Option<String>> = new.iter().map(name).collect();
+
+    // Pair each new profile with the old table it came from: first exact
+    // copies (so deleting one of two same-named profiles keeps the right
+    // comments), then by name, then a renamed one by position.
+    let mut pair: Vec<Option<usize>> = vec![None; new.len()];
+    let mut used = vec![false; old.len()];
+    /// Whether old table `o` (at `j`) can pair with new table `n` (at `i`).
+    type Pass<'a> = &'a dyn Fn(&Table, &Table, usize, usize) -> bool;
+    let passes: [Pass; 3] = [
+        &|o, n, _, _| name(o).is_some() && name(o) == name(n) && same_profile(o, n),
+        &|o, n, _, _| name(o).is_some() && name(o) == name(n),
+        &|_, _, i, j| i == j,
+    ];
+    for pass in passes {
+        for (i, table) in new.iter().enumerate() {
+            if pair[i].is_some() {
+                continue;
+            }
+            if let Some(j) = (0..old.len()).find(|&j| !used[j] && pass(old[j], table, i, j)) {
+                pair[i] = Some(j);
+                used[j] = true;
+            }
+        }
+    }
+
     let mut merged = ArrayOfTables::new();
     for (i, table) in new.iter().enumerate() {
-        let paired = old
-            .iter()
-            .find(|t| name(t).is_some() && name(t) == new_names[i])
-            .or_else(|| old.get(i).filter(|t| !new_names.contains(&name(t))));
-        match paired {
+        match pair[i].map(|j| old[j]) {
             Some(old_table) if same_profile(old_table, table) => merged.push(old_table.clone()),
             Some(old_table) => {
                 let mut kept = old_table.clone();
+                let old_git = kept.get("git").cloned();
                 merge_table(&mut kept, table);
+                // An unchanged `git` table keeps its own layout, inline or
+                // dotted, rather than the serialiser's.
+                if let (Some(old_git), Some(new_git)) = (old_git, table.get("git"))
+                    && same_git(&old_git, new_git)
+                {
+                    kept.insert("git", old_git);
+                }
                 merged.push(kept);
             }
-            None => merged.push(table.clone()),
+            None => merged.push((*table).clone()),
         }
     }
     doc.insert("profiles", Item::ArrayOfTables(merged));
@@ -248,6 +322,23 @@ fn same_profile(a: &Table, b: &Table) -> bool {
         let mut doc = DocumentMut::new();
         doc.insert("p", Item::Table(t.clone()));
         toml::from_str::<BTreeMap<String, Profile>>(&doc.to_string()).ok()
+    };
+    read(a).is_some() && read(a) == read(b)
+}
+
+/// Equal once read as `[profiles.git]` settings.
+fn same_git(a: &Item, b: &Item) -> bool {
+    #[derive(Deserialize, PartialEq)]
+    struct GitOnly {
+        #[serde(default, deserialize_with = "git_settings")]
+        git: BTreeMap<String, String>,
+    }
+    let read = |item: &Item| {
+        let mut table = Table::new();
+        table.insert("git", item.clone());
+        let mut doc = DocumentMut::new();
+        doc.insert("p", Item::Table(table));
+        toml::from_str::<BTreeMap<String, GitOnly>>(&doc.to_string()).ok()
     };
     read(a).is_some() && read(a) == read(b)
 }
@@ -453,6 +544,107 @@ email = "ada@old.example"
             fs::read_to_string(&path).unwrap(),
             text,
             "untouched profile"
+        );
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn unknown_profile_keys_are_an_error() {
+        let text = r#"
+            [[profiles]]
+            name = "p"
+            user_name = "n"
+            email = "e"
+            remote = ["github.com/acme/*"]
+        "#;
+        let err = toml::from_str::<Config>(text).unwrap_err().to_string();
+        assert!(err.contains("unknown field `remote`"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_keeps_permissions_refuses_read_only_and_leaves_no_tmp() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = temp_config("perms");
+        let config = Config {
+            profiles: vec![Profile {
+                name: "p".into(),
+                user_name: "n".into(),
+                email: "e".into(),
+                ..Default::default()
+            }],
+        };
+        config.save(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        config.save(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let err = config.save(&path).unwrap_err().to_string();
+        assert!(err.contains("read-only"), "{err}");
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_dangling_symlink_creates_its_target() {
+        let base = std::env::temp_dir().join(format!("gitenv-dangling-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("cfg")).unwrap();
+        let link = base.join("cfg/config.toml");
+        std::os::unix::fs::symlink("../dotfiles/gitenv/config.toml", &link).unwrap();
+        Config::default().save(&link).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(base.join("dotfiles/gitenv/config.toml").is_file());
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn saving_keeps_crlf_and_an_unchanged_inline_git_table() {
+        let path = temp_config("crlf");
+        let text = "# top\r\n[[profiles]]\r\nname = \"a\"\r\nuser_name = \"A\"\r\nemail = \"a@x\"\r\ngit = { \"pull.rebase\" = \"true\" } # keep\r\n";
+        fs::write(&path, text).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.profiles[0].email = "b@x".into();
+        config.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, text.replace("a@x", "b@x"));
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn deleting_one_of_two_same_named_profiles_keeps_the_right_comments() {
+        let path = temp_config("dups");
+        let text = r#"# first dup
+[[profiles]]
+name = "dup"
+user_name = "One"
+email = "one@x.com" # one
+
+# second dup
+[[profiles]]
+name = "dup"
+user_name = "Two"
+email = "two@x.com" # two
+"#;
+        fs::write(&path, text).unwrap();
+        let mut config = Config::load(&path).unwrap();
+        config.profiles.remove(0);
+        config.save(&path).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# second dup"), "{saved}");
+        assert!(saved.contains("email = \"two@x.com\" # two"), "{saved}");
+        assert!(
+            !saved.contains("# first dup") && !saved.contains("# one"),
+            "{saved}"
         );
         fs::remove_file(&path).unwrap();
     }
