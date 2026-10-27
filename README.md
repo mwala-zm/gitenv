@@ -442,15 +442,51 @@ gitenv completions bash > ~/.local/share/bash-completion/completions/gitenv
 gitenv completions fish > ~/.config/fish/completions/gitenv.fish
 ```
 
-## Development
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. For a bug, open an
+[issue](https://github.com/mwala-zm/gitenv/issues) with what you ran, what
+happened and what you expected, plus the output of `gitenv status` and
+`git --version`; take any tokens or private emails out first. For a larger
+change, open an issue to talk it through before writing the code.
+
+### Setting up
+
+You need Rust 1.88 or newer and git. Then:
 
 ```sh
+git clone https://github.com/mwala-zm/gitenv.git && cd gitenv
 cargo run          # launch the TUI in this repo
-cargo test         # unit tests; many drive real git in throwaway repos
-cargo clippy       # lints
+cargo test         # the tests; many drive real git in throwaway repos
 ```
 
-The code is split by responsibility:
+The tests never touch your own git config or profiles: each one works in a
+fresh folder under the system temp directory.
+
+### Before opening a pull request
+
+CI runs these on Linux and macOS, so run them first:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+
+- Add a test for every bug fix and new behaviour. Where git is involved,
+  test against real git in a temporary repository rather than a mock.
+- The TUI has snapshot tests (`insta`). After an intended visual change,
+  review the new snapshots with `cargo insta review` (from
+  `cargo install cargo-insta`), or accept them all
+  with `INSTA_UPDATE=always cargo test`, and commit the `.snap` files.
+- Comments are doc comments on the functions that need explaining, and
+  nowhere else; say why, not what.
+- Update this README when behaviour changes.
+- Keep each commit to one change, with a subject in the imperative ("Let the
+  most specific rule claim a repo") and a body that explains why.
+- Open the pull request against `main`.
+
+### How the code is laid out
 
 - `src/main.rs` parses the command line and runs the TUI's draw, wait,
   update loop.
