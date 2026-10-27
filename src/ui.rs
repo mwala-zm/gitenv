@@ -674,4 +674,153 @@ mod tests {
         let (shown, column) = visible("abc", Some(1), 40);
         assert_eq!((shown.as_str(), column), ("abc", 1));
     }
+
+    fn svg_colour(colour: Color, fallback: &'static str) -> &'static str {
+        match colour {
+            Color::Reset => fallback,
+            Color::Black => "#1e2127",
+            Color::Red | Color::LightRed => "#e06c75",
+            Color::Green | Color::LightGreen => "#98c379",
+            Color::Yellow | Color::LightYellow => "#e5c07b",
+            Color::Blue | Color::LightBlue => "#61afef",
+            Color::Magenta | Color::LightMagenta => "#c678dd",
+            Color::Cyan | Color::LightCyan => "#56b6c2",
+            Color::Gray => "#abb2bf",
+            Color::DarkGray => "#5c6370",
+            Color::White => "#ffffff",
+            _ => fallback,
+        }
+    }
+
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    /// The strokes of a box-drawing character as line segments in a unit
+    /// cell, so borders are continuous lines rather than font glyphs that
+    /// leave gaps between rows.
+    fn box_segments(symbol: &str) -> Option<&'static [(f64, f64, f64, f64)]> {
+        const H: (f64, f64, f64, f64) = (0.0, 0.5, 1.0, 0.5);
+        const V: (f64, f64, f64, f64) = (0.5, 0.0, 0.5, 1.0);
+        Some(match symbol {
+            "─" => &[H],
+            "│" => &[V],
+            "┌" => &[(0.5, 0.5, 1.0, 0.5), (0.5, 0.5, 0.5, 1.0)],
+            "┐" => &[(0.0, 0.5, 0.5, 0.5), (0.5, 0.5, 0.5, 1.0)],
+            "└" => &[(0.5, 0.0, 0.5, 0.5), (0.5, 0.5, 1.0, 0.5)],
+            "┘" => &[(0.5, 0.0, 0.5, 0.5), (0.0, 0.5, 0.5, 0.5)],
+            "├" => &[V, (0.5, 0.5, 1.0, 0.5)],
+            "┤" => &[V, (0.0, 0.5, 0.5, 0.5)],
+            _ => return None,
+        })
+    }
+
+    fn to_svg(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let (cw, ch, pad, bar) = (8.4_f64, 18.0_f64, 16.0_f64, 28.0_f64);
+        let (fg0, bg0) = ("#abb2bf", "#282c34");
+        let total_w = f64::from(width) * cw + 2.0 * pad;
+        let total_h = f64::from(height) * ch + 2.0 * pad + bar;
+        let mut back = String::new();
+        let mut lines = String::new();
+        let mut text = String::new();
+        for y in 0..height {
+            let mut run: Option<(u16, &str)> = None;
+            for x in 0..=width {
+                let top = pad + bar + f64::from(y) * ch;
+                let cell_bg = (x < width).then(|| {
+                    let cell = &buffer[(x, y)];
+                    if cell.modifier.contains(Modifier::REVERSED) {
+                        svg_colour(cell.fg, fg0)
+                    } else {
+                        svg_colour(cell.bg, bg0)
+                    }
+                });
+                if run.is_some_and(|(_, colour)| Some(colour) != cell_bg) {
+                    let (start, colour) = run.take().unwrap();
+                    if colour != bg0 {
+                        back.push_str(&format!(
+                            "<rect x=\"{:.1}\" y=\"{top:.1}\" width=\"{:.1}\" height=\"{ch}\" fill=\"{colour}\"/>\n",
+                            pad + f64::from(start) * cw,
+                            f64::from(x - start) * cw
+                        ));
+                    }
+                }
+                if run.is_none() {
+                    run = cell_bg.map(|colour| (x, colour));
+                }
+            }
+            for x in 0..width {
+                let cell = &buffer[(x, y)];
+                let fg = if cell.modifier.contains(Modifier::REVERSED) {
+                    svg_colour(cell.bg, bg0)
+                } else {
+                    svg_colour(cell.fg, fg0)
+                };
+                let (left, top) = (pad + f64::from(x) * cw, pad + bar + f64::from(y) * ch);
+                let symbol = cell.symbol();
+                let opacity = if cell.modifier.contains(Modifier::DIM) {
+                    " opacity=\"0.6\""
+                } else {
+                    ""
+                };
+                if let Some(segments) = box_segments(symbol) {
+                    for (x1, y1, x2, y2) in segments {
+                        lines.push_str(&format!(
+                            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{fg}\"{opacity}/>\n",
+                            left + x1 * cw,
+                            top + y1 * ch,
+                            left + x2 * cw,
+                            top + y2 * ch
+                        ));
+                    }
+                } else if !symbol.trim().is_empty() {
+                    let bold = if cell.modifier.contains(Modifier::BOLD) {
+                        " font-weight=\"bold\""
+                    } else {
+                        ""
+                    };
+                    text.push_str(&format!(
+                        "<text x=\"{left:.1}\" y=\"{:.1}\" fill=\"{fg}\"{bold}{opacity}>{}</text>\n",
+                        top + ch * 0.74,
+                        escape(symbol)
+                    ));
+                }
+            }
+        }
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total_w}\" height=\"{total_h}\" \
+             viewBox=\"0 0 {total_w} {total_h}\">\n\
+             <rect width=\"100%\" height=\"100%\" rx=\"10\" fill=\"{bg0}\"/>\n\
+             <circle cx=\"20\" cy=\"16\" r=\"6\" fill=\"#ff5f56\"/>\
+             <circle cx=\"40\" cy=\"16\" r=\"6\" fill=\"#ffbd2e\"/>\
+             <circle cx=\"60\" cy=\"16\" r=\"6\" fill=\"#27c93f\"/>\n\
+             {back}<g stroke-width=\"1.3\">\n{lines}</g>\n\
+             <g font-family=\"Menlo, 'SF Mono', Consolas, 'DejaVu Sans Mono', monospace\" \
+             font-size=\"14\">\n{text}</g>\n</svg>\n"
+        )
+    }
+
+    #[test]
+    #[ignore = "writes the README screenshot; run with --ignored"]
+    fn readme_screenshot() {
+        let mut profiles = profiles();
+        profiles.push(Profile {
+            name: "oss".into(),
+            user_name: "Ada Lovelace".into(),
+            email: "ada@lovelace.dev".into(),
+            signing_key: Some("~/.ssh/id_ed25519.pub".into()),
+            signing_format: Some(crate::profile::SigningFormat::Ssh),
+            sign_commits: Some(true),
+            ..Default::default()
+        });
+        let mut app = app(profiles, Some(repo()));
+        app.selected = 1;
+        let path = std::env::var("GITENV_SCREENSHOT").unwrap_or_else(|_| "docs/tui.svg".into());
+        std::fs::write(&path, to_svg(&app, 100, 24)).unwrap();
+    }
 }

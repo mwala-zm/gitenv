@@ -10,7 +10,7 @@ homepage = "https://github.com/mwala-zm/gitenv"
 keywords = ["git", "identity", "tui", "cli", "profiles"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.88"
-exclude = [".github/", "packaging/"]
+exclude = [".github/", "packaging/", "docs/"]
 
 [dependencies]
 anyhow = "1.0.104"

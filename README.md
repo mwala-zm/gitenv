@@ -1,30 +1,22 @@
 # gitenv
 
-A small terminal UI that makes sure you commit with the right git identity
-for the repo you're in.
+Commit with the right git identity in every repository.
 
-If you work with more than one team, you have probably pushed a commit with
-the wrong name, email, or signing key at least once. gitenv shows you, at a
-glance, which identity git will use in the current repo, whether it matches
-one of your saved profiles, and lets you switch with one key press.
+![gitenv showing a repository on the personal profile that a rule says belongs to the acme profile](docs/tui.png)
 
-```
- gitenv  right identity, right repo
-┌ Profiles ───────────────────┐┌ Current repository ───────────────────┐
-│  personal  me@example.com   ││root        ~/work/acme/api             │
-│> ● acme    me@acme.example  ││remote      git@github.com:acme/api.git │
-│                             ││                                        │
-│                             ││Effective identity                      │
-│                             ││name        Ada Lovelace                │
-│                             ││email       me@acme.example             │
-│                             ││signing key ABCD1234                    │
-│                             ││                                        │
-│                             ││✔ matches profile 'acme'                │
-│                             ││rule: 'acme' claims this repo (remote matches github.com/acme/*)
-│                             ││identity is set in this repo's .git/config
-└─────────────────────────────┘└────────────────────────────────────────┘
- ↑↓/jk select   Enter apply   e edit   n new   d delete   ? help   q quit
-```
+If you work for more than one client, team or open source project, you have
+probably pushed a commit with the wrong name, email, signing key or SSH key
+at least once. gitenv keeps one profile per identity and knows which
+repositories belong to which profile, so it can:
+
+- show at a glance which identity git will use here, and whether it is the
+  right one, then switch with one key press;
+- make git pick the right identity by itself, even in a fresh clone,
+  through git's own conditional includes;
+- refuse a commit or push made as the wrong person, from a hook;
+- audit every repository under a folder and fix them all at once;
+- check that each profile's keys exist and log in as the right account;
+- re-author the commits you made as the wrong person before you push them.
 
 ## Install
 
@@ -33,11 +25,8 @@ gitenv shells out to `git`, so git must be installed.
 **Homebrew** (macOS and Linux):
 
 ```sh
-brew tap mwala-zm/tap
-brew install gitenv
+brew install mwala-zm/tap/gitenv
 ```
-
-Or in one step: `brew install mwala-zm/tap/gitenv`.
 
 **Debian, Ubuntu** and **Fedora, RHEL, openSUSE**: each
 [GitHub release](https://github.com/mwala-zm/gitenv/releases/latest) has a
@@ -70,56 +59,273 @@ cargo binstall gitenv
 **By hand**: prebuilt archives for macOS and Linux are attached to each
 release. Unpack one and put `gitenv` somewhere on your `PATH`.
 
-## Use
+## Quick start
 
-Run it inside any repository, or point it at one:
+1. Run `gitenv` inside a repository. The first run creates a profile from
+   your global git identity. Press `n` to add one for each client.
+2. Give each profile the repositories it owns, by remote or by folder. In
+   the form these are the remote and path rule fields, for example
+   `github.com/acme/*` and `~/work/acme/**`.
+3. Let git apply those rules by itself, so new clones start out right:
 
-```sh
-cd ~/work/acme/api && gitenv
-gitenv ~/work/acme/api
-gitenv check             # no UI: just the exit code, for hooks and scripts
-gitenv hook install      # run that check before every commit and push
-gitenv status            # what git would use here, and whether it is right
-gitenv status --short    # one token for a shell prompt, e.g. `acme`
-gitenv apply acme        # write a profile into .git/config without the UI
-gitenv apply             # apply whichever profile's rules claim this repo
-gitenv scan ~/work       # every repo under a directory, and its verdict
-gitenv export --install  # let git apply your rules itself, even in new clones
-gitenv doctor            # check every profile's keys exist and log in
-gitenv fix-authors       # re-author unpushed commits made as someone else
-```
+   ```sh
+   gitenv export --install
+   ```
+
+4. Have every commit and push checked:
+
+   ```sh
+   gitenv hook install --global
+   ```
+
+5. Bring the clones you already have in line, and check your keys:
+
+   ```sh
+   gitenv scan ~/work --fix
+   gitenv doctor
+   ```
+
+## The terminal UI
+
+Run `gitenv` inside a repository, or point it at one: `gitenv ~/work/acme/api`.
+Pointed at a folder that is not itself a repository, such as `gitenv ~/work`,
+it opens on the list of repositories in it.
+
+The left pane lists your profiles: `●` marks the one git is using here and
+`◆` the one a rule says this repository belongs to. The right pane shows the
+repository, the identity git will use, where that identity comes from,
+whether it is right, and whether any of the last 20 commits were made as
+someone else.
 
 | Key | Action |
 |---|---|
 | `↑` `↓` or `j` `k` | move between profiles |
-| `Enter` | write the selected profile into this repo's `.git/config` |
+| `Enter` | write the selected profile into this repo's config |
 | `e` | edit the selected profile |
 | `n` | create a new profile |
 | `d` | delete the selected profile (asks first) |
-| `r` | re-read the repo |
-| `s` | list every repo next to this one (see below) |
+| `r` | re-read the repo and the profiles file |
+| `s` | list every repository next to this one |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 
-Applying a profile sets `user.name`, `user.email`, and optionally
-`user.signingkey`, `gpg.format`, `commit.gpgsign` and `core.sshCommand` in
-the repo's local config. Local
-config always wins over `~/.gitconfig`, so the global identity is left alone.
+When a rule claims the repository, its profile is selected on start, so
+`Enter` is the fix. Applying a profile writes `user.name`, `user.email` and
+whatever else the profile sets into the repository's local config, which
+always wins over your global config, so nothing global changes.
+
+In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
+`Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
+(delete to start or end) and `Ctrl-W` (delete the word before the cursor)
+work as in a shell.
+
+In the repository list (`s`), `Enter` applies the profile a rule claims for
+the highlighted repository, `o` opens it in the main view, `r` rescans and
+`Esc` goes back.
+
+## Profiles
+
+Profiles live in one TOML file:
+
+| Platform | Config path |
+|---|---|
+| macOS | `~/Library/Application Support/gitenv/config.toml` |
+| Linux | `~/.config/gitenv/config.toml` |
+| Windows (untested, build from source) | `%APPDATA%\gitenv\config\config.toml` |
+
+Set `GITENV_CONFIG=/path/to/config.toml` to use another file, for example
+one in a dotfiles repository; a symlinked config works too.
+
+```toml
+[[profiles]]
+name = "personal"
+user_name = "Ada Lovelace"
+email = "ada@example.com"
+
+[[profiles]]
+name = "acme"
+user_name = "Ada Lovelace"
+email = "ada@acme.example"
+signing_key = "ABCD1234"
+ssh_key = "~/.ssh/id_acme"
+remotes = ["github.com/acme/*"]
+paths = ["~/work/acme/**"]
+
+[[profiles]]
+name = "oss"
+user_name = "Ada Lovelace"
+email = "ada@example.com"
+signing_key = "~/.ssh/id_ed25519.pub"
+signing_format = "ssh"
+sign_commits = true
+
+[profiles.git]
+pull.rebase = true
+"url.git@github.com:ada/.insteadOf" = "https://github.com/ada/"
+```
+
+Everything after `email` is optional:
+
+- `signing_key` becomes `user.signingkey`. With `signing_format = "ssh"` it
+  is the path to a public key.
+- `signing_format` becomes `gpg.format` (`openpgp`, `ssh` or `x509`), and
+  `sign_commits` becomes `commit.gpgsign`.
+- `ssh_key` makes pushes and fetches from the repository use
+  `ssh -i <key> -o IdentitiesOnly=yes`, so the right key is offered even
+  with several loaded in your agent. `~` is expanded and spaces are fine.
+- `remotes` and `paths` are [rules](#rules).
+- `[profiles.git]` holds any other git setting the identity needs. Dotted
+  keys can be written bare (`pull.rebase = true`) or quoted.
+
+Every setting a profile has counts when gitenv decides whether a repository
+is on it: the right email with a different signing key or SSH key is not a
+match. Settings a profile leaves out are left as they are.
+
+Applying a profile replaces the `[profiles.git]` keys the previous one wrote
+and removes those it does not set. A value you had set yourself before
+gitenv first wrote that key is kept and put back once no profile sets it.
+gitenv tracks this under `gitenv.managed` and `gitenv.backup` in the
+repository's config.
+
+You can edit the file by hand at any time. Unknown keys are an error, so a
+typo such as `remote` for `remotes` is reported instead of silently ignored.
+Saving from the TUI keeps your comments and layout, the file's permissions
+and its line endings. If the file changed on disk while the TUI was open,
+gitenv refuses to save over it; press `r` to reload.
+
+## Rules
+
+Without rules, gitenv is content as long as a repository's identity is *one
+of* your profiles. Rules say *which* profile a repository belongs to, so
+gitenv can tell you it is on the wrong one.
+
+`remotes` are globs matched against the remote URL reduced to
+`host/owner/repo`. `github.com/acme/*` matches
+`git@github.com:acme/api.git`, `https://github.com/acme/api` and
+`https://user:token@github.com/acme/api.git` alike, ignoring case. `*`
+stops at a slash and `**` does not, so `gitlab.com/acme/**` covers
+subgroups. The `origin` remote decides when there is one, and otherwise
+every remote is tried. `url.<base>.insteadOf` rewrites are applied first,
+as git applies them.
+
+`paths` are globs matched against the repository's top folder. They must
+start with `/` or `~/`; `dir/**` also matches `dir` itself, and a folder
+reached through a symlink matches either way.
+
+When several rules match, the most specific one wins, wherever its profile
+sits in the file: a remote rule beats a path rule, then the rule with the
+longer text before its first wildcard wins, then the earlier profile. So
+`~/projects/**` can belong to a personal profile and
+`~/projects/clients/agency/**` to the agency's.
+
+Where the identity comes from matters too. gitenv reads the repository's
+local and worktree config over your global config, and, like git, lets
+`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` and `EMAIL` override them. git sets
+the author variables for hooks, so the pre-commit check sees the real
+author of the commit being made, even one given with `--author`. Emails are
+compared ignoring case.
+
+## Keeping repositories right automatically
+
+### Let git switch by itself
+
+```sh
+gitenv export --install
+```
+
+`gitenv export` writes each profile that has rules to a small git config
+file, plus an `includes.gitconfig` that loads them with git's own
+conditional includes: path rules become `includeIf "gitdir/i:..."` and
+remote rules `includeIf "hasconfig:remote.*.url:..."` (git 2.36 or newer),
+spelled out for every URL form and made case-insensitive, since git compares
+remote URLs exactly. `--install` adds the file to the end of your global git
+config, after any settings that would otherwise override it. From then on a
+fresh clone has the right identity before its first commit, with no hook and
+without gitenv running. When several rules match, the most specific one
+wins, as in gitenv.
+
+The files live in a `gitenv-includes` folder next to the profiles file, and
+the TUI rewrites them whenever you save or delete a profile. A setting in a
+repository's own config, such as one `gitenv apply` wrote, still wins.
+
+Where git and gitenv can differ:
+
+- git keeps every setting from every matching include. Where a broad rule
+  and a narrower one both match, `gpg.format`, `commit.gpgsign` and
+  `core.sshCommand` are reset to git's defaults for the narrower profile, but
+  a `user.signingkey` or `[profiles.git]` key from the broader profile still
+  applies if the narrower one does not set its own.
+- git checks every remote; gitenv prefers `origin` when there is one.
+- In a linked worktree, git matches path rules against the main
+  repository's folder; gitenv matches the worktree's own folder.
+
+### Hooks
+
+```sh
+gitenv hook install            # this repository
+gitenv hook install --global   # every repository
+gitenv hook remove [--global]  # take them out again
+```
+
+The hooks run `gitenv check` before every commit and push. On a mismatch
+the commit is refused and gitenv prints what git would have used and how to
+fix it.
+
+`--global` uses your global `core.hooksPath`, or sets it to `~/.githooks`.
+git ignores each repository's own `.git/hooks` once that is set, so gitenv
+also writes a hook for every other event git runs hooks for, each handing
+over to the repository's own hook of that name: `commit-msg`,
+`post-checkout`, Git LFS and the rest keep working. The two left out,
+`reference-transaction` and `post-index-change`, run on nearly every git
+command. `remove --global` unsets `core.hooksPath` again if gitenv set it.
+
+A hook gitenv did not write, or one you edited after gitenv wrote it, is
+never replaced or removed. If gitenv is not on the `PATH` a hook runs with
+(some GUI clients use a short one), the hook warns and lets the commit
+through rather than blocking every commit.
+
+To write the hook yourself instead:
+
+```sh
+#!/bin/sh
+# .git/hooks/pre-commit
+exec gitenv check
+```
+
+## Command line
+
+```sh
+gitenv check             # exit code only: 0 right, 1 wrong, 2 could not look
+gitenv status            # what git would use here, and whether it is right
+gitenv status --short    # one token for a shell prompt, e.g. `acme`
+gitenv apply acme        # write a profile into this repo without the UI
+gitenv apply             # apply whichever profile's rules claim this repo
+gitenv scan ~/work       # every repository under a folder, and its verdict
+gitenv export --install  # let git apply your rules itself
+gitenv hook install      # check every commit and push
+gitenv doctor            # check every profile's keys exist and log in
+gitenv fix-authors       # re-author unpushed commits made as someone else
+gitenv completions zsh   # shell completion script
+```
 
 ### Scripts and prompts
 
-`gitenv apply <profile>` does what Enter does in the UI, and `gitenv apply`
-with no name applies the profile whose [rules](#rules) claim the repo. Both
-take `--path DIR` to act on a repo you are not inside. That makes a
-post-checkout hook or a clone wrapper a one-liner:
+`gitenv check` prints nothing when all is well, and on a mismatch explains
+what git would use and which profile the repository should be on. It exits
+2 when it cannot look: not a repository, an unreadable config, no git.
+
+`gitenv apply <profile>` does what `Enter` does in the UI, and `gitenv
+apply` with no name applies the profile whose rules claim the repository.
+Both take `--path DIR`, which makes a clone wrapper a one-liner:
 
 ```sh
 git clone git@github.com:acme/api.git && gitenv apply --path api
 ```
 
-`gitenv status` prints the repo, remote, identity, matching profile, the
-rule that applies and a verdict. `gitenv status --short` prints one token
-and exits like `check`, so a prompt can colour it: `acme` when all is well,
+`gitenv status` prints the repository, remote, identity, where the identity
+comes from, recent commit authors, the matching profile, the rule that
+applies and a verdict. `gitenv status --short` prints one token and exits
+like `check`, so a prompt can colour it: `acme` when all is well,
 `personal -> acme` when a rule says another profile should be in use, `?`
 when nothing matches. For [Starship](https://starship.rs):
 
@@ -133,8 +339,7 @@ style = "yellow"
 
 ### Auditing many repositories
 
-`gitenv scan DIR` finds every repository under a directory and prints one
-line per repo with its verdict, then a summary:
+`gitenv scan DIR` lists every repository under a folder with its verdict:
 
 ```
 STATUS PROFILE          REPO
@@ -145,21 +350,17 @@ none   ?                ~/play/thing
 3 repositories, 1 on the right profile, 2 to look at
 ```
 
-The same list is in the TUI: press `s` to scan the folder that holds the
-current repo, or start gitenv on a folder that is not itself a repo
-(`gitenv ~/work`) to open on it. There, `Enter` applies the profile a rule
-claims for the highlighted repo, `o` opens it in the main view, `r`
-rescans and `Esc` goes back.
-
 `--problems` hides the `ok` rows. `--fix` applies the expected profile to
-every repo a rule claims that is on the wrong identity, so after adding a
-rule you can bring all your clones in line at once. The exit code is 1 if
-anything still needs attention. Hidden directories, `node_modules` and
-`target` are skipped, and a repo's subdirectories are not searched.
+every repository a rule claims that is on the wrong identity, then reads it
+again; one that something stronger still overrides, such as worktree config,
+is reported and stays `wrong`. Repositories git cannot read are named on
+stderr. The exit code is 1 if anything still needs attention. Hidden
+folders, `node_modules` and `target` are skipped, and a repository's own
+subfolders are not searched.
 
 ### Checking the profiles themselves
 
-A repo can carry the right email and still push with the wrong account.
+A repository can carry the right email and still push as the wrong account.
 `gitenv doctor` checks that each profile would work:
 
 ```
@@ -171,13 +372,33 @@ personal <ada@example.com>
   ok    nothing to check beyond name and email
 ```
 
-It reports missing ssh and signing key files, a GPG key missing from your
-keyring, `sign_commits` without a key, two profiles with the same name or
-the same identity, and patterns that are not valid globs. For every host a
-profile's remote rules name, it runs `ssh -T` with only that profile's key
-and shows the account the host greets, so a key registered to the wrong
-account stands out. `--offline` skips that step. It exits 1 if any check
-failed.
+It reports missing SSH and signing key files, a GPG key missing from your
+keyring, `sign_commits` without a key, profiles with the same name or the
+same identity, patterns that are not valid globs, relative path rules and
+`[profiles.git]` keys git would reject. For each host a profile's remote
+rules name, it runs `ssh -T` with only that profile's key and shows which
+account the host greets, so a key registered to the wrong account stands
+out. `--offline` skips that. It exits 1 if any check failed.
+
+### Fixing commits made as someone else
+
+Switching identity only protects the next commit. The TUI and `gitenv
+status` look at the authors of the last 20 commits and warn when some were
+made with another email than the repository should use.
+
+`gitenv fix-authors` repairs the ones that are not published yet: commits
+on the current branch that no remote branch, tag or other local branch has,
+whose author or committer is not the right profile. It lists them, asks,
+rebuilds them with the right author, keeping each commit's date, message
+and content exactly, and then applies the profile. It never touches your
+work tree, index or ignored files and runs no hooks, and the old commits stay
+reachable through `git reflog`.
+
+It refuses during a rebase, merge, cherry-pick, revert or bisect; when the
+branch tracks a remote branch this clone has no copy of, as in a
+single-branch clone, since those commits may well be pushed; when the
+commits include a merge; and at a shallow clone's cut-off. For commits that
+are already pushed, use `git filter-repo` and coordinate a force push.
 
 ### Shell completions
 
@@ -190,210 +411,27 @@ gitenv completions bash > ~/.local/share/bash-completion/completions/gitenv
 gitenv completions fish > ~/.config/fish/completions/gitenv.fish
 ```
 
-### Catching past mistakes
-
-Switching identity only protects the next commit. The repository pane and
-`gitenv status` also look at the authors of the last 20 commits on the
-current branch and warn when some were made with a different email than
-the repo should be using (the profile a rule claims it for, else the one
-git would use now), with a count per author.
-
-`gitenv fix-authors` repairs the ones you have not pushed yet. It lists the
-commits on the current branch that no remote branch has and whose author is
-not that profile, asks, applies the profile, and replays them with the
-author corrected and the original author date kept. Commits already on a
-remote are never rewritten, so nobody else's clone breaks; for those, use
-`git filter-repo` and coordinate a force push. It refuses with uncommitted
-changes or a merge among the unpushed commits, `--yes` skips the question,
-and the previous commits stay reachable through `git reflog`.
-
-## Hooks
-
-`gitenv check` exits 0 when the repo's identity matches a saved profile, 1
-when it does not, and 2 when it could not look (not a repo, config
-unreadable, git missing). It prints nothing on success, so it makes a quiet
-hook. gitenv installs it as a pre-commit and a pre-push hook for you:
-
-```sh
-gitenv hook install            # this repository
-gitenv hook install --global   # every repository, through core.hooksPath
-gitenv hook remove [--global]  # take them out again
-```
-
-A hook gitenv did not write is never replaced; you are told which line to
-add to it instead. `--global` uses your global `core.hooksPath`, or sets it
-to `~/.githooks`. git skips each repo's own `.git/hooks` once that is set,
-so the global hooks run the repo's own hook after the check, and `remove
---global` unsets `core.hooksPath` again if gitenv set it. If gitenv is not
-on `PATH` when a hook runs (some GUI clients use a short one), the hook
-warns and lets the commit through rather than blocking every commit.
-
-To write the hook yourself instead:
-
-```sh
-#!/bin/sh
-# .git/hooks/pre-commit
-exec gitenv check
-```
-
-On a mismatch the commit is refused and gitenv prints what git would have
-used and which repo to open it in.
-
-## Profiles
-
-On first run gitenv creates a config file seeded from your global git
-identity. Press `n` to add a profile or `e` to change one from inside the
-TUI, or edit the file directly with one `[[profiles]]` block per identity.
-In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
-`Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
-(delete to start/end) and `Ctrl-W` (delete the word before the cursor)
-work as in a shell.
-
-| Platform | Config path |
-|---|---|
-| macOS | `~/Library/Application Support/gitenv/config.toml` |
-| Linux | `~/.config/gitenv/config.toml` |
-| Windows (untested, build from source) | `%APPDATA%\gitenv\config\config.toml` |
-
-Set `GITENV_CONFIG=/path/to/config.toml` to use a different file, for
-example one kept in a dotfiles repo.
-
-```toml
-[[profiles]]
-name = "personal"
-user_name = "Ada Lovelace"
-email = "ada@example.com"
-
-[[profiles]]
-name = "acme"
-user_name = "Ada Lovelace"
-email = "ada@acme.example"
-signing_key = "ABCD1234"
-ssh_key = "/Users/ada/.ssh/id_acme"
-
-[[profiles]]
-name = "oss"
-user_name = "Ada Lovelace"
-email = "ada@example.com"
-signing_key = "~/.ssh/id_ed25519.pub"
-signing_format = "ssh"
-sign_commits = true
-```
-
-Everything after `email` is optional, and the `[profiles.git]` table can
-hold any other key the identity needs:
-
-```toml
-[[profiles]]
-name = "acme"
-user_name = "Ada Lovelace"
-email = "ada@acme.example"
-
-[profiles.git]
-"url.git@github.com:acme/.insteadOf" = "https://github.com/acme/"
-pull.rebase = true
-```
-
-Those keys are written with the profile and checked when matching. gitenv
-notes the keys it wrote under `gitenv.managed` in the repo's config, so
-applying another profile removes the ones that profile does not set; keys
-you set by hand are left alone. Dotted keys can be written bare
-(`pull.rebase = true`) or quoted (`"pull.rebase" = "true"`). `signing_format` is written to
-`gpg.format` (`openpgp`, `ssh` or `x509`) and `sign_commits` to
-`commit.gpgsign`; with SSH signing, `signing_key` is the path to the public
-key. Both count towards the match, so a repo that would make unsigned or
-GPG-signed commits when the profile asks for SSH-signed ones is reported as
-not matching. Leaving them out leaves git's own setting alone. When `ssh_key` is set, pushes from
-that repo use `ssh -i '<path>' -o IdentitiesOnly=yes`, so the right key is
-offered even if several are loaded in your agent. A leading `~` is expanded,
-and the path is quoted so spaces are fine. The ssh key counts towards the
-match: a repo with the right email but a different `core.sshCommand` is
-reported as not matching.
-
-## Rules
-
-Without rules, gitenv is happy as long as the repo's identity is *one of*
-your profiles. Rules let a profile claim repositories, so gitenv can tell
-you the repo is on the *wrong* profile:
-
-```toml
-[[profiles]]
-name = "acme"
-user_name = "Ada Lovelace"
-email = "ada@acme.example"
-remotes = ["github.com/acme/*", "gitlab.acme.example/**"]
-paths = ["~/work/acme/**"]
-```
-
-`remotes` are globs matched against the origin URL reduced to
-`host/owner/repo`, so `github.com/acme/*` matches
-`git@github.com:acme/api.git` and `https://github.com/acme/api.git` alike.
-`*` stops at a slash and `**` does not. `paths` are globs matched against
-the repository root; `~` is your home directory and `dir/**` also matches
-`dir` itself.
-
-When several rules match, the most specific one wins, wherever its profile
-sits in the file: a remote rule beats a path rule, and otherwise the rule
-with the longer text before its first wildcard wins. So a freelancer can
-give `~/projects/**` to a personal profile and
-`~/projects/clients/agency/**` to the agency's, and repos under `agency`
-belong to the agency. Rules that are equally specific fall back to file
-order.
-
-When a rule claims the repo, the TUI marks that profile with `◆`, highlights
-it on start so Enter applies it, and the repository pane says which profile
-the repo is on and which it should be on. `gitenv check` exits 1 with the
-same explanation, even if the current identity is another saved profile.
-
-### Letting git switch by itself
-
-Rules tell you a repo is on the wrong profile; `gitenv export` makes git
-pick the right one in the first place. It writes each profile that has
-rules to a small git config file and an `includes.gitconfig` that loads
-them with git's own conditional includes:
-
-```sh
-gitenv export --install
-```
-
-Path rules become `includeIf "gitdir/i:..."` and remote rules
-`includeIf "hasconfig:remote.*.url:..."` (git 2.36 or newer), spelled out
-for SSH and HTTPS URLs since git compares them as written. `--install` adds
-one `include.path` line to your global config. From then on a fresh clone
-has the right name, email, signing key and SSH key before its first
-commit, with no hook and without gitenv running. When several rules match,
-the most specific one wins, as it does in gitenv.
-
-The files live in a `gitenv-includes` directory next to the profiles file,
-and the TUI rewrites them whenever you save or delete a profile. Anything
-`gitenv apply` writes to a repo's `.git/config` still takes precedence,
-since local config always wins. One difference from gitenv's own matching:
-git checks every remote, while gitenv prefers `origin` when there is one.
-
 ## Development
 
 ```sh
 cargo run          # launch the TUI in this repo
-cargo test         # unit tests, including one that inits a throwaway repo
+cargo test         # unit tests; many drive real git in throwaway repos
 cargo clippy       # lints
 ```
 
-The code is small and split by responsibility:
+The code is split by responsibility:
 
-- `src/main.rs` parses the command line, sets up the terminal and runs the
-  draw, wait, update loop.
-- `src/app.rs` holds all TUI state and maps key presses to actions.
-- `src/ui.rs` draws the screen from that state and never mutates it.
-- `src/form.rs` is the profile editor form and its validation.
-- `src/profile.rs` defines profiles and loads and saves the config file,
-  keeping its comments and layout.
-- `src/git.rs` reads and writes git config by shelling out to `git`.
-- `src/rules.rs` decides which profile a repo should be on.
-- `src/check.rs` turns a repo and the profiles into a verdict, and is the
-  `check` subcommand.
-- `src/cmd.rs` is `apply` and `status`; `src/scan.rs` is `scan`.
-- `src/export.rs`, `src/hook.rs`, `src/doctor.rs` and `src/fix.rs` are
-  `export`, `hook`, `doctor` and `fix-authors`.
+- `src/main.rs` parses the command line and runs the TUI's draw, wait,
+  update loop.
+- `src/app.rs` holds the TUI's state and maps key presses to actions;
+  `src/ui.rs` draws it; `src/form.rs` is the profile form.
+- `src/profile.rs` loads and saves the profiles file.
+- `src/git.rs` reads and writes git config by running `git`.
+- `src/rules.rs` decides which profile a repository should be on, and
+  `src/check.rs` turns that into a verdict.
+- `src/cmd.rs` is `apply` and `status`; `src/scan.rs`, `src/export.rs`,
+  `src/hook.rs`, `src/doctor.rs` and `src/fix.rs` are `scan`, `export`,
+  `hook`, `doctor` and `fix-authors`.
 
 ## License
 
