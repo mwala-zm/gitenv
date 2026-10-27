@@ -168,8 +168,9 @@ Everything after `email` is optional:
 
 - `signing_key` becomes `user.signingkey`. With `signing_format = "ssh"` it
   is the path to a public key.
-- `signing_format` becomes `gpg.format` (`openpgp`, `ssh` or `x509`), and
-  `sign_commits` becomes `commit.gpgsign`.
+- `signing_format` becomes `gpg.format` (`openpgp` or `gpg`, `ssh` or
+  `x509`), and `sign_commits` (`true`, `false`, `yes` or `no`) becomes
+  `commit.gpgsign`.
 - `ssh_key` makes pushes and fetches from the repository use
   `ssh -i <key> -o IdentitiesOnly=yes`, so the right key is offered even
   with several loaded in your agent. `~` is expanded and spaces are fine.
@@ -179,7 +180,10 @@ Everything after `email` is optional:
 
 Every setting a profile has counts when gitenv decides whether a repository
 is on it: the right email with a different signing key or SSH key is not a
-match. Settings a profile leaves out are left as they are.
+match. When a profile leaves out the signing key, signing format,
+`sign_commits` or `ssh_key`, applying it removes those settings from the
+repository's own config, so a previous profile's cannot linger; your global
+settings then apply.
 
 Applying a profile replaces the `[profiles.git]` keys the previous one wrote
 and removes those it does not set. A value you had set yourself before
@@ -188,10 +192,12 @@ gitenv tracks this under `gitenv.managed` and `gitenv.backup` in the
 repository's config.
 
 You can edit the file by hand at any time. Unknown keys are an error, so a
-typo such as `remote` for `remotes` is reported instead of silently ignored.
-Saving from the TUI keeps your comments and layout, the file's permissions
-and its line endings. If the file changed on disk while the TUI was open,
-gitenv refuses to save over it; press `r` to reload.
+typo such as `remote` for `remotes` is reported instead of silently ignored;
+since `gitenv check` cannot look then, the hooks block commits until the
+file is fixed. Saving from the TUI keeps your comments, layout and line
+endings, and writes into the same file, so its permissions, owner, ACLs and
+hard links stay. If the file changed on disk while the TUI was open, gitenv
+refuses to save over it; press `r` to reload.
 
 ## Rules
 
@@ -204,8 +210,9 @@ gitenv can tell you it is on the wrong one.
 `git@github.com:acme/api.git`, `https://github.com/acme/api` and
 `https://user:token@github.com/acme/api.git` alike, ignoring case. `*`
 stops at a slash and `**` does not, so `gitlab.com/acme/**` covers
-subgroups. The `origin` remote decides when there is one, and otherwise
-every remote is tried. `url.<base>.insteadOf` rewrites are applied first,
+subgroups, and a rule that is only a host, such as `github.com`, claims
+everything on it. The `origin` remote decides when there is one, and
+otherwise every remote is tried. `url.<base>.insteadOf` rewrites are applied first,
 as git applies them.
 
 `paths` are globs matched against the repository's top folder. They must
@@ -250,14 +257,19 @@ repository's own config, such as one `gitenv apply` wrote, still wins.
 
 Where git and gitenv can differ:
 
-- git keeps every setting from every matching include. Where a broad rule
-  and a narrower one both match, `gpg.format`, `commit.gpgsign` and
-  `core.sshCommand` are reset to git's defaults for the narrower profile, but
-  a `user.signingkey` or `[profiles.git]` key from the broader profile still
-  applies if the narrower one does not set its own.
+- git keeps every setting from every matching include. Where a broader
+  rule of another profile can match the same repositories, a profile that
+  leaves out `gpg.format`, `commit.gpgsign` or `core.sshCommand` gets the
+  value from your global config (or git's default) written into its file, so
+  the broader profile's does not apply. A `user.signingkey` or
+  `[profiles.git]` key from the broader profile still applies if the
+  narrower one does not set its own. Export again after changing those
+  global settings.
 - git checks every remote; gitenv prefers `origin` when there is one.
-- In a linked worktree, git matches path rules against the main
-  repository's folder; gitenv matches the worktree's own folder.
+- git matches remote rules against the URL as written, before
+  `url.<base>.insteadOf` rewrites; gitenv matches the rewritten URL.
+- In a linked worktree or a submodule, git matches path rules against the
+  main repository's `.git` folder; gitenv matches the checkout's own folder.
 
 ### Hooks
 
@@ -269,15 +281,25 @@ gitenv hook remove [--global]  # take them out again
 
 The hooks run `gitenv check` before every commit and push. On a mismatch
 the commit is refused and gitenv prints what git would have used and how to
-fix it.
+fix it. Because git passes the commit's author to hooks, a wrong author
+given with `--author`, kept by `--amend` or set in `GIT_AUTHOR_*` is caught
+too.
 
 `--global` uses your global `core.hooksPath`, or sets it to `~/.githooks`.
 git ignores each repository's own `.git/hooks` once that is set, so gitenv
 also writes a hook for every other event git runs hooks for, each handing
 over to the repository's own hook of that name: `commit-msg`,
-`post-checkout`, Git LFS and the rest keep working. The two left out,
-`reference-transaction` and `post-index-change`, run on nearly every git
-command. `remove --global` unsets `core.hooksPath` again if gitenv set it.
+`post-checkout`, Git LFS and the rest keep working. Left out are
+`reference-transaction` and `post-index-change`, which run on nearly every
+git command, and `push-to-checkout`, whose presence alone changes how git
+updates a repository you push to. With a global `core.hooksPath` set,
+`gitenv hook install` and `remove` without `--global` refuse, since a hook
+for one repository would not run there.
+
+`remove --global` unsets `core.hooksPath` again if it is `~/.githooks` and
+nothing else is left in it. When something is, such as a hook you edited,
+the setting has to stay, so gitenv takes the identity check out but keeps
+the hooks that run each repository's own, and says which files to remove.
 
 A hook gitenv did not write, or one you edited after gitenv wrote it, is
 never replaced or removed. If gitenv is not on the `PATH` a hook runs with
@@ -316,7 +338,9 @@ what git would use and which profile the repository should be on. It exits
 
 `gitenv apply <profile>` does what `Enter` does in the UI, and `gitenv
 apply` with no name applies the profile whose rules claim the repository.
-Both take `--path DIR`, which makes a clone wrapper a one-liner:
+If something stronger than the repository's config, such as worktree config
+or `GIT_AUTHOR_*`, still makes git commit as someone else, it says so and
+exits 1. Both take `--path DIR`, which makes a clone wrapper a one-liner:
 
 ```sh
 git clone git@github.com:acme/api.git && gitenv apply --path api
@@ -326,8 +350,9 @@ git clone git@github.com:acme/api.git && gitenv apply --path api
 comes from, recent commit authors, the matching profile, the rule that
 applies and a verdict. `gitenv status --short` prints one token and exits
 like `check`, so a prompt can colour it: `acme` when all is well,
-`personal -> acme` when a rule says another profile should be in use, `?`
-when nothing matches. For [Starship](https://starship.rs):
+`personal -> acme` when a rule says another profile should be in use,
+`? -> acme` when the identity is no profile at all but a rule names one, and
+`?` when nothing matches. Passwords in remote URLs are shown as `***`. For [Starship](https://starship.rs):
 
 ```toml
 [custom.gitenv]
@@ -374,8 +399,9 @@ personal <ada@example.com>
 
 It reports missing SSH and signing key files, a GPG key missing from your
 keyring, `sign_commits` without a key, profiles with the same name or the
-same identity, patterns that are not valid globs, relative path rules and
-`[profiles.git]` keys git would reject. For each host a profile's remote
+same identity, patterns that are not valid globs, relative path rules,
+names git would trim when writing a commit, and `[profiles.git]` keys git
+would reject. For each host a profile's remote
 rules name, it runs `ssh -T` with only that profile's key and shows which
 account the host greets, so a key registered to the wrong account stands
 out. `--offline` skips that. It exits 1 if any check failed.
@@ -389,16 +415,21 @@ made with another email than the repository should use.
 `gitenv fix-authors` repairs the ones that are not published yet: commits
 on the current branch that no remote branch, tag or other local branch has,
 whose author or committer is not the right profile. It lists them, asks,
-rebuilds them with the right author, keeping each commit's date, message
-and content exactly, and then applies the profile. It never touches your
-work tree, index or ignored files and runs no hooks, and the old commits stay
-reachable through `git reflog`.
+rebuilds them with the right author, keeping each commit's date, message,
+content and other headers exactly, and then applies the profile. It never
+touches your work tree, index or ignored files, runs no hooks, ignores
+`git replace` objects, and moves the branch only if it is still where it was
+when you were asked, so a commit or branch switch made meanwhile makes it
+refuse. The old commits stay reachable through `git reflog`; notes stay on
+them.
 
 It refuses during a rebase, merge, cherry-pick, revert or bisect; when the
 branch tracks a remote branch this clone has no copy of, as in a
 single-branch clone, since those commits may well be pushed; when the
-commits include a merge; and at a shallow clone's cut-off. For commits that
-are already pushed, use `git filter-repo` and coordinate a force push.
+commits include a merge; at a shallow clone's cut-off; and with old-style
+`.git/info/grafts`. Commits pushed by URL, with no remote-tracking branch to
+show for it, look unpushed. For commits that are already pushed, use
+`git filter-repo` and coordinate a force push.
 
 ### Shell completions
 

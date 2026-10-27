@@ -47,7 +47,7 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
             if a.name == b.name {
                 out.push(fail(format!("two profiles are named '{}'", a.name)));
             } else if a.user_name == b.user_name
-                && a.email == b.email
+                && a.email.eq_ignore_ascii_case(&b.email)
                 && a.signing_key == b.signing_key
                 && a.ssh_key == b.ssh_key
                 && a.signing_format == b.signing_format
@@ -66,6 +66,14 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
         let checks = [rules::validate(&p.remotes), rules::validate_paths(&p.paths)];
         for e in checks.into_iter().filter_map(Result::err) {
             out.push(fail(format!("'{}': {e}", p.name)));
+        }
+        if git::as_git_writes(&p.user_name) != p.user_name {
+            out.push(warn(format!(
+                "'{}': git writes the name as '{}', so commits never match '{}'",
+                p.name,
+                git::as_git_writes(&p.user_name),
+                p.user_name
+            )));
         }
         for key in p.git.keys().filter(|k| !git::valid_key(k)) {
             out.push(fail(format!(
@@ -350,6 +358,28 @@ mod tests {
         assert!(
             text.contains("'core' under [profiles.git] is not a git config key"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn same_identity_ignores_email_case() {
+        let mut twin = profile("acme");
+        twin.name = "acme-old".into();
+        twin.email = "Ada@ACME.example".into();
+        let f = config_findings(&Config {
+            profiles: vec![profile("acme"), twin],
+        });
+        assert_eq!(levels(&f), vec![Level::Warn], "{f:?}");
+    }
+
+    #[test]
+    fn names_git_would_trim_are_flagged() {
+        let mut p = profile("acme");
+        p.user_name = "Ada ".into();
+        let f = config_findings(&Config { profiles: vec![p] });
+        assert!(
+            f[0].message.contains("git writes the name as 'Ada'"),
+            "{f:?}"
         );
     }
 }

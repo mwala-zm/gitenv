@@ -12,7 +12,7 @@ expression: draw(&app)
 "│             │e         edit the selected profile                               │             │"
 "│             │n         create a new profile                                    │             │"
 "│             │d         delete the selected profile                             │             │"
-"│             │r         re-read the repository                                  │             │"
+"│             │r         re-read the repo and the profiles file                  │             │"
 "│             │s         list every repository next to this one                  │             │"
 "│             │?  h      show this help                                          │             │"
 "│             │q  Esc    quit                                                    │             │"

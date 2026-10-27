@@ -47,8 +47,27 @@ pub fn remote_host_path(url: &str) -> String {
         path = rest;
     }
     let path = path.trim_matches('/');
-    let path = path.strip_suffix(".git").unwrap_or(path);
+    let path = match path.len().checked_sub(4) {
+        Some(cut) if path.is_char_boundary(cut) && path[cut..].eq_ignore_ascii_case(".git") => {
+            &path[..cut]
+        }
+        _ => path,
+    };
     format!("{host}/{path}").trim_end_matches('/').to_string()
+}
+
+pub fn hide_password(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    match rest[..host_end].rfind('@') {
+        Some(at) => match rest[..at].split_once(':') {
+            Some((user, _)) => format!("{scheme}://{user}:***{}", &rest[at..]),
+            None => url.to_string(),
+        },
+        None => url.to_string(),
+    }
 }
 
 fn expand_path(pattern: &str) -> String {
@@ -126,7 +145,10 @@ pub fn all(config: &Config) -> Vec<Rule<'_>> {
         .iter()
         .flat_map(|profile| {
             let remotes = profile.remotes.iter().map(move |rule| {
-                let pattern = normalize_remote(rule);
+                let mut pattern = normalize_remote(rule);
+                if !pattern.contains('/') {
+                    pattern.push_str("/**");
+                }
                 Rule {
                     profile,
                     reason: Reason::Remote(rule.clone()),
@@ -174,6 +196,10 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
         })
         .min_by_key(|rule| Reverse(rule.rank))
         .map(|rule| (rule.profile, rule.reason))
+}
+
+pub fn literal_prefix(pattern: &str) -> &str {
+    &pattern[..literal_len(pattern)]
 }
 
 pub fn validate(patterns: &[String]) -> Result<(), String> {
@@ -386,5 +412,36 @@ mod tests {
         assert!(validate_paths(&["~/work/**".into(), "/srv/*".into()]).is_ok());
         assert!(validate_paths(&["work/**".into()]).is_err());
         assert!(resolve_path("p/rel/**").is_none());
+    }
+
+    #[test]
+    fn passwords_in_urls_are_hidden() {
+        assert_eq!(
+            hide_password("https://oauth2:glpat-xyz@gitlab.com/a/b.git"),
+            "https://oauth2:***@gitlab.com/a/b.git"
+        );
+        assert_eq!(
+            hide_password("https://ada@github.com/x"),
+            "https://ada@github.com/x"
+        );
+        assert_eq!(
+            hide_password("git@github.com:acme/api.git"),
+            "git@github.com:acme/api.git"
+        );
+    }
+
+    #[test]
+    fn a_host_alone_claims_everything_on_it_and_git_suffix_case_is_ignored() {
+        let config = Config {
+            profiles: vec![profile("gh", &["github.com"], &[])],
+        };
+        let claimed = |url: &str| expected(&config, &repo(Some(url), "/tmp/x")).is_some();
+        assert!(claimed("git@github.com:acme/api.git"));
+        assert!(claimed("https://github.com/x/y"));
+        assert!(!claimed("git@gitlab.com:x/y.git"));
+        assert_eq!(
+            normalize_remote("git@x.example:TEAM/REPO.GIT"),
+            "x.example/team/repo"
+        );
     }
 }

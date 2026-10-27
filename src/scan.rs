@@ -18,6 +18,8 @@ pub struct Options {
 
 const SKIP: &[&str] = &["node_modules", "target", ".git"];
 
+static FIX: Mutex<()> = Mutex::new(());
+
 pub fn find_repos(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk(root, &mut found);
@@ -115,7 +117,8 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<(Vec<Row>, V
 /// One `git` process per repository: the walk found its top level already and
 /// the table shows no history. With `fix`, a wrong repository a rule claims
 /// gets that profile and is read again; a fix that worktree config or the
-/// environment overrides is reported and the row stays wrong.
+/// environment overrides is reported and the row stays wrong. Fixes run one
+/// at a time, since a repository and its worktrees share a config file.
 fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> {
     let Some(repo) = git::open(path.to_path_buf(), 0) else {
         return Err(format!("skipped {}: git cannot read it", tildify(path)));
@@ -126,6 +129,7 @@ fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> 
         && let Verdict::WrongProfile { .. } = &verdict
         && let Some((profile, _)) = rules::expected(config, &repo)
     {
+        let _one_at_a_time = FIX.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(err) = git::apply(&repo, profile) {
             eprintln!("gitenv: could not fix {}: {err:#}", tildify(path));
         } else if git::open(path.to_path_buf(), 0)
@@ -322,6 +326,63 @@ mod tests {
         let (rows, _) = scan(&config, &base, &opts).unwrap();
         assert!(rows.iter().all(|r| r.verdict.is_ok()));
 
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_repo_and_its_worktrees_are_fixed_together() {
+        let base = std::env::temp_dir().join(format!("gitenv-scan-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let main = base.join("main");
+        init(&main, "git@example.com:x/main.git");
+        git(
+            &main,
+            &[
+                "-c",
+                "user.name=A",
+                "-c",
+                "user.email=a@b",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "i",
+            ],
+        );
+        for n in 0..6 {
+            let wt = base.join(format!("wt{n}"));
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "-q",
+                    wt.to_str().unwrap(),
+                    "-b",
+                    &format!("b{n}"),
+                ],
+            );
+        }
+        let config = Config {
+            profiles: vec![Profile {
+                name: "acme".into(),
+                user_name: "Ada".into(),
+                email: "ada@acme.example".into(),
+                paths: vec![format!(
+                    "{}/**",
+                    std::fs::canonicalize(&base).unwrap().display()
+                )],
+                ..Default::default()
+            }],
+        };
+        let fix = Options {
+            problems_only: false,
+            fix: true,
+        };
+        let (rows, warnings) = scan(&config, &base, &fix).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|r| r.fixed.is_some()), "{rows:?}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

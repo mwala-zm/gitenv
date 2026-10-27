@@ -17,9 +17,13 @@ pub fn load(dir: &Path) -> Result<(Config, Repo)> {
 
 pub fn apply(name: Option<&str>, dir: &Path) -> ExitCode {
     match try_apply(name, dir) {
-        Ok(msg) => {
+        Ok((msg, true)) => {
             println!("{msg}");
             ExitCode::SUCCESS
+        }
+        Ok((msg, false)) => {
+            eprintln!("{msg}");
+            ExitCode::from(1)
         }
         Err(err) => {
             eprintln!("gitenv: {err:#}");
@@ -28,7 +32,7 @@ pub fn apply(name: Option<&str>, dir: &Path) -> ExitCode {
     }
 }
 
-fn try_apply(name: Option<&str>, dir: &Path) -> Result<String> {
+fn try_apply(name: Option<&str>, dir: &Path) -> Result<(String, bool)> {
     let (config, repo) = load(dir)?;
     let profile = match name {
         Some(name) => config
@@ -52,11 +56,15 @@ fn try_apply(name: Option<&str>, dir: &Path) -> Result<String> {
         },
     };
     git::apply(&repo, profile)?;
-    Ok(format!(
+    let applied = format!(
         "gitenv: applied profile '{}' to {}",
         profile.name,
         repo.root.display()
-    ))
+    );
+    Ok(match git::still_overridden(&repo.root, profile) {
+        Some(why) => (format!("{applied}, but {why}"), false),
+        None => (applied, true),
+    })
 }
 
 pub fn status(short: bool, dir: &Path) -> ExitCode {
@@ -97,7 +105,8 @@ pub fn long_status(config: &Config, repo: &Repo, verdict: &Verdict) -> String {
     let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "(not set)".into());
     let mut out = Vec::new();
     out.push(format!("repo         {}", repo.root.display()));
-    out.push(format!("remote       {}", show(&repo.remote)));
+    let remote = repo.remote.as_deref().map(rules::hide_password);
+    out.push(format!("remote       {}", show(&remote)));
     out.push(format!("name         {}", show(&repo.effective.name)));
     out.push(format!("email        {}", show(&repo.effective.email)));
     if repo.effective.signing_key.is_some() {

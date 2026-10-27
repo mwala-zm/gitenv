@@ -24,7 +24,6 @@ const ALL: &[&str] = &[
     "proc-receive",
     "post-receive",
     "post-update",
-    "push-to-checkout",
     "pre-auto-gc",
     "post-rewrite",
     "sendemail-validate",
@@ -38,8 +37,12 @@ const ALL: &[&str] = &[
 /// same name, unless that is this very file (`-ef`), as when the global hooks
 /// path is some repo's own hooks folder.
 fn script(name: &str, global: bool) -> String {
+    script_for(name, CHECKED.contains(&name), global)
+}
+
+fn script_for(name: &str, check: bool, global: bool) -> String {
     let mut text = format!("#!/bin/sh\n{MARKER}\n");
-    if CHECKED.contains(&name) {
+    if check {
         text.push_str(
             "if command -v gitenv >/dev/null 2>&1; then\n\
              \tgitenv check || exit 1\n\
@@ -97,15 +100,15 @@ fn hooks_dir(dir: &Path, global: bool) -> Result<(PathBuf, bool)> {
     let Some(path) = git(dir, &["rev-parse", "--git-path", "hooks"])? else {
         bail!("{} is not inside a git repository", dir.display());
     };
-    let path = PathBuf::from(path);
-    Ok((
-        if path.is_absolute() {
-            path
-        } else {
-            dir.join(path)
-        },
-        false,
-    ))
+    if git(dir, &["config", "--local", "core.hooksPath"])?.is_none()
+        && let Some(global_path) = git(dir, &["config", "--global", "core.hooksPath"])?
+    {
+        bail!(
+            "your global core.hooksPath ({global_path}) makes git run hooks from there for \
+             every repository; use `gitenv hook install --global` or `remove --global`"
+        );
+    }
+    Ok((std::path::absolute(dir.join(path))?, false))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -119,7 +122,13 @@ enum State {
 fn state(path: &Path, name: &str) -> State {
     match fs::read_to_string(path) {
         Err(_) if !path.exists() => State::Missing,
-        Ok(text) if text == script(name, true) || text == script(name, false) => State::Ours,
+        Ok(text)
+            if [(true, true), (true, false), (false, true)]
+                .iter()
+                .any(|&(check, global)| text == script_for(name, check, global)) =>
+        {
+            State::Ours
+        }
         Ok(text) if text.contains(MARKER) => State::Edited,
         _ => State::Foreign,
     }
@@ -128,8 +137,10 @@ fn state(path: &Path, name: &str) -> State {
 /// Writes the hooks, never replacing one gitenv did not write or that was
 /// edited since. git skips each repo's own `.git/hooks` once core.hooksPath is
 /// set, so `global` also writes a hook for every other event that only hands
-/// over to the repo's own; reference-transaction and post-index-change are left
-/// out because they run on nearly every git command.
+/// over to the repo's own. Left out: reference-transaction and
+/// post-index-change, which run on nearly every git command, and
+/// push-to-checkout, whose mere presence replaces git's own work tree update
+/// for `receive.denyCurrentBranch=updateInstead`.
 fn write_hooks(hooks: &Path, global: bool) -> Result<Vec<String>> {
     fs::create_dir_all(hooks).with_context(|| format!("creating {}", hooks.display()))?;
     let names: &[&str] = if global { ALL } else { &CHECKED };
@@ -155,7 +166,7 @@ fn write_hooks(hooks: &Path, global: bool) -> Result<Vec<String>> {
             }
             State::Foreign => {
                 lines.push(format!(
-                    "  left {} alone: it is not gitenv's",
+                    "  left {} alone: it is not gitenv's, so repos' own {name} hooks will not run",
                     path.display()
                 ));
                 continue;
@@ -210,6 +221,40 @@ fn remove_hooks(hooks: &Path) -> Vec<String> {
     lines
 }
 
+fn leftovers(hooks: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(hooks) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|name| {
+            !ALL.contains(&name.as_str()) || state(&hooks.join(name), name) != State::Ours
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// With the global hooks folder staying in use, drops the identity check but
+/// keeps every hook handing over to the repo's own, since git would
+/// otherwise run none of them.
+fn keep_handovers(hooks: &Path) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    for &name in &CHECKED {
+        let path = hooks.join(name);
+        if state(&path, name) == State::Ours {
+            fs::write(&path, script_for(name, false, true))
+                .with_context(|| format!("writing {}", path.display()))?;
+            lines.push(format!(
+                "  removed the identity check from {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(lines)
+}
+
 pub fn install(dir: &Path, global: bool) -> Result<String> {
     let (hooks, unset) = hooks_dir(dir, global)?;
     let mut lines = vec![format!("gitenv: hooks in {}", hooks.display())];
@@ -229,7 +274,7 @@ pub fn install(dir: &Path, global: bool) -> Result<String> {
         ));
     }
     if global {
-        lines.push("  each repo's own hooks in .git/hooks still run".into());
+        lines.push("  every other hook in each repo's .git/hooks still runs".into());
     }
     Ok(lines.join("\n"))
 }
@@ -239,6 +284,23 @@ pub fn install(dir: &Path, global: bool) -> Result<String> {
 /// so the setting install made is undone.
 pub fn remove(dir: &Path, global: bool) -> Result<String> {
     let (hooks, _) = hooks_dir(dir, global)?;
+    let staying = if global && hooks == default_global_dir()? {
+        leftovers(&hooks)
+    } else {
+        Vec::new()
+    };
+    if !staying.is_empty() {
+        let mut lines = vec![format!("gitenv: hooks in {}", hooks.display())];
+        lines.extend(keep_handovers(&hooks)?);
+        lines.push(format!(
+            "  core.hooksPath stays set because {} {} still there, so the hooks that run each \
+             repo's own hooks were kept; remove {} and run this again to undo the rest",
+            staying.join(", "),
+            if staying.len() == 1 { "is" } else { "are" },
+            if staying.len() == 1 { "it" } else { "them" },
+        ));
+        return Ok(lines.join("\n"));
+    }
     let mut lines = remove_hooks(&hooks);
     if lines.is_empty() {
         lines.push(format!("gitenv: no gitenv hooks in {}", hooks.display()));
@@ -463,6 +525,28 @@ mod tests {
             !dir.join(".git/hooks/pre-push").exists(),
             "the untouched one went"
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn edited_or_foreign_files_keep_the_handovers_in_place() {
+        let dir = repo("keep");
+        let hooks = dir.join("global-hooks");
+        write_hooks(&hooks, true).unwrap();
+        assert!(leftovers(&hooks).is_empty());
+        let mut text = fs::read_to_string(hooks.join("pre-push")).unwrap();
+        text.push_str("# mine\n");
+        fs::write(hooks.join("pre-push"), &text).unwrap();
+        fs::write(hooks.join("my-notes.txt"), "x").unwrap();
+        assert_eq!(leftovers(&hooks), vec!["my-notes.txt", "pre-push"]);
+
+        keep_handovers(&hooks).unwrap();
+        let pre_commit = fs::read_to_string(hooks.join("pre-commit")).unwrap();
+        assert!(!pre_commit.contains("gitenv check"));
+        assert!(pre_commit.contains("exec \"$own\""));
+        assert_eq!(state(&hooks.join("pre-commit"), "pre-commit"), State::Ours);
+        assert_eq!(fs::read_to_string(hooks.join("pre-push")).unwrap(), text);
+        assert!(hooks.join("commit-msg").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 }

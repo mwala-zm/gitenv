@@ -9,12 +9,43 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, Value};
 
 pub const CONFIG_ENV: &str = "GITENV_CONFIG";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SigningFormat {
     Openpgp,
     Ssh,
     X509,
+}
+
+impl<'de> Deserialize<'de> for SigningFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "signing_format must be openpgp (or gpg), ssh or x509, not '{text}'"
+            ))
+        })
+    }
+}
+
+/// `sign_commits` as TOML `true`/`false` or any of git's spellings, such as
+/// `"yes"`, which the profile form accepts too.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Flag {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Flag>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(Flag::Bool(b)) => Ok(Some(b)),
+        Some(Flag::Text(t)) => crate::git::git_bool(&t).map(Some).ok_or_else(|| {
+            serde::de::Error::custom(format!("sign_commits must be true or false, not '{t}'"))
+        }),
+    }
 }
 
 impl SigningFormat {
@@ -48,7 +79,11 @@ pub struct Profile {
     pub ssh_key: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_format: Option<SigningFormat>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "lenient_bool",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub sign_commits: Option<bool>,
     #[serde(
         default,
@@ -100,6 +135,7 @@ fn git_settings<'de, D: serde::Deserializer<'de>>(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub profiles: Vec<Profile>,
@@ -133,27 +169,27 @@ impl Config {
     }
 
     pub fn load(path: &PathBuf) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let text =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
         let config: Config =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         Ok(config)
     }
 
-    /// Edits the existing file in place where it can, so comments and layout
-    /// around unchanged profiles survive. The file is replaced atomically,
-    /// keeping its permissions and line endings, and a symlinked config is
-    /// written through, even one whose target does not exist yet.
+    /// Edits the existing file's text where it can, so comments and layout
+    /// around unchanged profiles survive, and writes it back into the same
+    /// file, keeping its permissions, owner, ACLs, extended attributes, hard
+    /// links and line endings. A symlinked config is written through, even one
+    /// whose target does not exist yet.
     pub fn save(&self, path: &Path) -> Result<()> {
         let path = write_target(path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let permissions = fs::metadata(&path).ok().map(|m| m.permissions());
-        if permissions.as_ref().is_some_and(fs::Permissions::readonly) {
+        if fs::metadata(&path).is_ok_and(|m| m.permissions().readonly()) {
             bail!("{} is read-only", path.display());
         }
         let fresh: DocumentMut = toml::to_string_pretty(self)
@@ -176,15 +212,7 @@ impl Config {
         } else {
             text
         };
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Some(permissions) = permissions {
-            fs::set_permissions(&tmp, permissions).ok();
-        }
-        if let Err(err) = fs::rename(&tmp, &path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(err).with_context(|| format!("replacing {}", path.display()));
-        }
+        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
 
@@ -632,5 +660,77 @@ email = "two@x.com" # two
             "{saved}"
         );
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_an_error() {
+        let text = "[[profile]]\nname = \"p\"\nuser_name = \"n\"\nemail = \"e\"\n";
+        let err = toml::from_str::<Config>(text).unwrap_err().to_string();
+        assert!(err.contains("unknown field `profile`"), "{err}");
+    }
+
+    #[test]
+    fn signing_values_accept_what_the_form_accepts() {
+        let text = r#"
+            [[profiles]]
+            name = "p"
+            user_name = "n"
+            email = "e"
+            signing_format = "gpg"
+            sign_commits = "yes"
+        "#;
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(
+            config.profiles[0].signing_format,
+            Some(SigningFormat::Openpgp)
+        );
+        assert_eq!(config.profiles[0].sign_commits, Some(true));
+        let bad = text.replace("\"yes\"", "\"perhaps\"");
+        assert!(
+            toml::from_str::<Config>(&bad)
+                .unwrap_err()
+                .to_string()
+                .contains("sign_commits")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_keeps_the_inode_and_a_loop_is_an_error() {
+        use std::os::unix::fs::MetadataExt;
+        let path = temp_config("inode");
+        let other = temp_config("hardlink");
+        let _ = fs::remove_file(&other);
+        Config::default().save(&path).unwrap();
+        fs::hard_link(&path, &other).unwrap();
+        let before = fs::metadata(&path).unwrap().ino();
+        let config = Config {
+            profiles: vec![Profile {
+                name: "p".into(),
+                user_name: "n".into(),
+                email: "e".into(),
+                ..Default::default()
+            }],
+        };
+        config.save(&path).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before);
+        assert_eq!(
+            Config::load(&other).unwrap(),
+            config,
+            "hard link sees the save"
+        );
+        fs::remove_file(&other).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        let a = temp_config("loop-a");
+        let b = temp_config("loop-b");
+        let _ = (fs::remove_file(&a), fs::remove_file(&b));
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert!(Config::load(&a).is_err());
+        assert!(config.save(&a).is_err());
+        assert!(fs::symlink_metadata(&a).unwrap().file_type().is_symlink());
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&b).unwrap();
     }
 }

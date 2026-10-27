@@ -63,28 +63,54 @@ fn render(entries: &[(String, String)]) -> String {
     out
 }
 
+pub struct Defaults {
+    signing_format: String,
+    sign_commits: String,
+    ssh_command: String,
+}
+
+impl Defaults {
+    fn git() -> Self {
+        Self {
+            signing_format: "openpgp".into(),
+            sign_commits: "false".into(),
+            ssh_command: "ssh".into(),
+        }
+    }
+
+    fn global() -> Self {
+        let get = |key: &str, fallback: String| {
+            Command::new("git")
+                .args(["config", "--global", "--includes", "--get", key])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or(fallback)
+        };
+        let git = Self::git();
+        Self {
+            signing_format: get("gpg.format", git.signing_format),
+            sign_commits: get("commit.gpgsign", git.sign_commits),
+            ssh_command: get("core.sshCommand", git.ssh_command),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Shared {
+struct Needs {
     signing_format: bool,
     sign_commits: bool,
     ssh_key: bool,
 }
 
-impl Shared {
-    fn of<'a>(profiles: impl Iterator<Item = &'a Profile>) -> Self {
-        profiles.fold(Self::default(), |s, p| Self {
-            signing_format: s.signing_format || p.signing_format.is_some(),
-            sign_commits: s.sign_commits || p.sign_commits.is_some(),
-            ssh_key: s.ssh_key || p.ssh_key.is_some(),
-        })
-    }
-}
-
 /// The settings in a profile's file. git keeps every key of every matching
-/// include, so a profile that leaves gpg.format, commit.gpgsign or
-/// core.sshCommand unset writes git's harmless default for it whenever another
-/// exported profile sets it; the losing profile's value would stick otherwise.
-fn entries(profile: &Profile, shared: Shared) -> Vec<(String, String)> {
+/// include, so where a less specific rule of another profile can match the
+/// same repos and sets gpg.format, commit.gpgsign or core.sshCommand, a
+/// profile that leaves one unset writes the value it would have without that
+/// other profile: the user's global setting, else git's default.
+fn entries(profile: &Profile, needs: Needs, defaults: &Defaults) -> Vec<(String, String)> {
     let mut entries = vec![
         ("user.name".to_string(), profile.user_name.clone()),
         ("user.email".to_string(), profile.email.clone()),
@@ -94,46 +120,130 @@ fn entries(profile: &Profile, shared: Shared) -> Vec<(String, String)> {
     }
     match profile.signing_format {
         Some(format) => entries.push(("gpg.format".into(), format.as_git().into())),
-        None if shared.signing_format => entries.push(("gpg.format".into(), "openpgp".into())),
+        None if needs.signing_format => {
+            entries.push(("gpg.format".into(), defaults.signing_format.clone()))
+        }
         None => {}
     }
     match profile.sign_commits {
         Some(sign) => entries.push(("commit.gpgsign".into(), sign.to_string())),
-        None if shared.sign_commits => entries.push(("commit.gpgsign".into(), "false".into())),
+        None if needs.sign_commits => {
+            entries.push(("commit.gpgsign".into(), defaults.sign_commits.clone()))
+        }
         None => {}
     }
     match &profile.ssh_key {
         Some(key) => entries.push(("core.sshCommand".into(), git::ssh_command(key))),
-        None if shared.ssh_key => entries.push(("core.sshCommand".into(), "ssh".into())),
+        None if needs.ssh_key => {
+            entries.push(("core.sshCommand".into(), defaults.ssh_command.clone()))
+        }
         None => {}
     }
     entries.extend(profile.git.iter().map(|(k, v)| (k.clone(), v.clone())));
     entries
 }
 
-fn case_insensitive(glob: &str) -> String {
-    let mut out = String::with_capacity(glob.len() * 4);
-    let mut in_class = false;
-    for c in glob.chars() {
-        match c {
-            '[' if !in_class => {
-                in_class = true;
-                out.push(c);
-            }
-            ']' if in_class => {
-                in_class = false;
-                out.push(c);
-            }
-            c if c.is_ascii_alphabetic() && !in_class => {
-                out.push('[');
-                out.push(c.to_ascii_lowercase());
-                out.push(c.to_ascii_uppercase());
-                out.push(']');
-            }
-            c => out.push(c),
+/// Whether some repository could match both rules. Two path rules, or two
+/// remote rules, can only overlap when one's text before its first wildcard
+/// starts with the other's; a path rule and a remote rule always can.
+fn may_overlap(a: &Rule, b: &Rule) -> bool {
+    let spellings = |r: &Rule| -> Vec<String> {
+        std::iter::once(&r.pattern)
+            .chain(&r.resolved)
+            .map(|p| rules::literal_prefix(p).to_ascii_lowercase())
+            .collect()
+    };
+    match (&a.reason, &b.reason) {
+        (Reason::Path(_), Reason::Path(_)) | (Reason::Remote(_), Reason::Remote(_)) => {
+            spellings(a).iter().any(|x| {
+                spellings(b)
+                    .iter()
+                    .any(|y| x.starts_with(y.as_str()) || y.starts_with(x.as_str()))
+            })
         }
+        _ => true,
+    }
+}
+
+/// `glob` matching letters of either case, as gitenv's own matching does:
+/// each letter becomes a class of both cases, and letters and ranges inside
+/// an existing class gain their other case too.
+fn case_insensitive(glob: &str) -> String {
+    let chars: Vec<char> = glob.chars().collect();
+    let mut out = String::with_capacity(glob.len() * 4);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '[' {
+            let mut j = i + 1;
+            if matches!(chars.get(j), Some('!' | '^')) {
+                j += 1;
+            }
+            if chars.get(j) == Some(&']') {
+                j += 1;
+            }
+            while j < chars.len() && chars[j] != ']' {
+                j += 1;
+            }
+            if j < chars.len() {
+                out.push_str(&case_class(&chars[i + 1..j]));
+                i = j + 1;
+                continue;
+            }
+        }
+        if c.is_ascii_alphabetic() {
+            out.push('[');
+            out.push(c.to_ascii_lowercase());
+            out.push(c.to_ascii_uppercase());
+            out.push(']');
+        } else {
+            out.push(c);
+        }
+        i += 1;
     }
     out
+}
+
+fn case_class(content: &[char]) -> String {
+    let (negation, mut rest) = match content.first() {
+        Some(&c @ ('!' | '^')) => (Some(c), &content[1..]),
+        _ => (None, content),
+    };
+    let mut body = String::new();
+    let mut extra = String::new();
+    while let Some(&c) = rest.first() {
+        if rest.len() >= 3 && rest[1] == '-' {
+            let (from, to) = (c, rest[2]);
+            body.extend([from, '-', to]);
+            if from.is_ascii_alphabetic() && to.is_ascii_alphabetic() {
+                let swap = |x: char| {
+                    if x.is_ascii_lowercase() {
+                        x.to_ascii_uppercase()
+                    } else {
+                        x.to_ascii_lowercase()
+                    }
+                };
+                extra.extend([swap(from), '-', swap(to)]);
+            }
+            rest = &rest[3..];
+        } else {
+            body.push(c);
+            if c.is_ascii_alphabetic() {
+                extra.push(if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                });
+            }
+            rest = &rest[1..];
+        }
+    }
+    let mut class = String::from("[");
+    class.extend(negation);
+    class.push_str(&body);
+    class.push_str(&extra);
+    class.push(']');
+    class
 }
 
 /// The path part of an scp-style URL pattern (`host:<path>`). git's wildmatch
@@ -262,26 +372,67 @@ fn check_keys(profile: &Profile) -> Result<()> {
 /// that loads them with `includeIf`, then removes files an earlier export left
 /// for profiles that are gone. git keeps the last value it reads, so blocks go
 /// least specific first, ties with the earliest profile last, and the value git
-/// keeps is the one from the rule gitenv would pick. Relative path rules never
-/// match and are skipped.
+/// keeps is the one from the rule gitenv would pick. Relative path rules and
+/// patterns that are not valid globs never match and are skipped.
 pub fn write(config: &Config, out: &Path) -> Result<Written> {
-    let with_rules: Vec<&Profile> = config
-        .profiles
-        .iter()
-        .filter(|p| !p.remotes.is_empty() || !p.paths.is_empty())
-        .collect();
-    for profile in &with_rules {
+    write_with(config, out, &Defaults::global())
+}
+
+fn write_with(config: &Config, out: &Path, defaults: &Defaults) -> Result<Written> {
+    let mut ranked: Vec<(usize, Rule)> = rules::all(config).into_iter().enumerate().collect();
+    ranked.sort_by_key(|(i, rule)| (rule.rank, Reverse(*i)));
+    let mut skipped = Vec::new();
+    ranked.retain(|(_, rule)| {
+        let why = match rule.reason {
+            Reason::Path(_) if !Path::new(&rule.pattern).is_absolute() => {
+                Some("path rules must start with / or ~/")
+            }
+            _ if glob::Pattern::new(&rule.pattern).is_err() => Some("not a valid glob"),
+            _ => None,
+        };
+        if let Some(why) = why {
+            skipped.push(format!("'{}': {} ({why})", rule.profile.name, rule.reason));
+        }
+        why.is_none()
+    });
+
+    let mut exported: Vec<&Profile> = Vec::new();
+    for (_, rule) in &ranked {
+        if !exported.iter().any(|p| std::ptr::eq(*p, rule.profile)) {
+            exported.push(rule.profile);
+        }
+    }
+    exported.sort_by_key(|p| config.profiles.iter().position(|q| std::ptr::eq(q, *p)));
+    for profile in &exported {
         check_keys(profile)?;
     }
     fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-    let shared = Shared::of(with_rules.iter().copied());
-    let files = file_names(with_rules.iter().copied());
+    let files = file_names(exported.iter().copied());
+
+    let needs = |profile: &Profile| {
+        let mut needs = Needs::default();
+        for (n, (_, mine)) in ranked.iter().enumerate() {
+            if !std::ptr::eq(mine.profile, profile) {
+                continue;
+            }
+            for (_, theirs) in &ranked[..n] {
+                let other = theirs.profile;
+                if std::ptr::eq(other, profile) || !may_overlap(theirs, mine) {
+                    continue;
+                }
+                needs.signing_format |= other.signing_format.is_some();
+                needs.sign_commits |= other.sign_commits.is_some();
+                needs.ssh_key |= other.ssh_key.is_some();
+            }
+        }
+        needs
+    };
 
     let mut keep = vec![INCLUDES.to_string()];
     let mut keys = Vec::new();
     for (profile, name) in &files {
         let path = out.join(name);
-        let entries = entries(profile, shared);
+        let entries = entries(profile, needs(profile), defaults);
         keys.extend(entries.iter().map(|(k, _)| git::normalize_key(k)));
         fs::write(&path, render(&entries))
             .with_context(|| format!("writing {}", path.display()))?;
@@ -290,20 +441,11 @@ pub fn write(config: &Config, out: &Path) -> Result<Written> {
     keys.sort();
     keys.dedup();
 
-    let mut ranked: Vec<(usize, Rule)> = rules::all(config).into_iter().enumerate().collect();
-    ranked.sort_by_key(|(i, rule)| (rule.rank, Reverse(*i)));
-    let mut skipped = Vec::new();
-    let mut count = 0;
     let mut text = format!("{HEADER}\n");
     for (_, rule) in &ranked {
-        if matches!(rule.reason, Reason::Path(_)) && !Path::new(&rule.pattern).is_absolute() {
-            skipped.push(format!("'{}': {}", rule.profile.name, rule.reason));
-            continue;
-        }
         let Some((_, name)) = files.iter().find(|(p, _)| std::ptr::eq(*p, rule.profile)) else {
             continue;
         };
-        count += 1;
         let target = out.join(name).display().to_string();
         text.push_str(&format!("# {}: {}\n", rule.profile.name, rule.reason));
         for condition in conditions(rule) {
@@ -327,7 +469,7 @@ pub fn write(config: &Config, out: &Path) -> Result<Written> {
     Ok(Written {
         includes,
         profiles: files.len(),
-        rules: count,
+        rules: ranked.len(),
         skipped,
         keys,
     })
@@ -344,7 +486,7 @@ pub fn refresh(config: &Config, config_path: &Path) -> Result<bool> {
 
 fn global_config_file() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("GIT_CONFIG_GLOBAL").filter(|v| !v.is_empty()) {
-        return Ok(git::expand_tilde(Path::new(&path)));
+        return Ok(PathBuf::from(path));
     }
     let home = directories::UserDirs::new()
         .context("could not find your home directory")?
@@ -387,7 +529,7 @@ fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<
     let output = Command::new("git")
         .args(["config", "--file"])
         .arg(config_file)
-        .args(["--list", "-z"])
+        .args(["--includes", "--list", "-z"])
         .output()
         .context("running git config --file")?;
     let text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -396,15 +538,19 @@ fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<
         .filter(|e| !e.is_empty())
         .map(|e| e.split_once('\n').unwrap_or((e, "")))
         .collect();
-    let ours: Vec<&str> = entries
+    let mut ours: Vec<&str> = entries
         .iter()
         .filter(|(k, v)| *k == "include.path" && same_file(v, config_file, includes))
         .map(|(_, v)| *v)
         .collect();
+    ours.sort_unstable();
+    ours.dedup();
     let position =
         |pred: &dyn Fn(&str, &str) -> bool| entries.iter().rposition(|(k, v)| pred(k, v));
     let last_ours = position(&|k, v| k == "include.path" && same_file(v, config_file, includes));
-    let last_setting = position(&|k, _| keys.iter().any(|key| *key == git::normalize_key(k)));
+    let last_setting = position(&|k, _| {
+        k == "include.path" || keys.iter().any(|key| *key == git::normalize_key(k))
+    });
     let outcome = match (last_ours, last_setting) {
         (Some(ours), Some(setting)) if setting > ours => Installed::Moved,
         (Some(_), _) => return Ok(Installed::AlreadyThere),
@@ -515,6 +661,10 @@ mod tests {
     use super::*;
     use crate::git::Repo;
 
+    fn write(config: &Config, out: &Path) -> Result<Written> {
+        write_with(config, out, &Defaults::git())
+    }
+
     fn profile(name: &str, email: &str) -> Profile {
         Profile {
             name: name.into(),
@@ -576,7 +726,7 @@ mod tests {
             "url.git@github.com:acme/.insteadOf".into(),
             "https://github.com/acme/".into(),
         );
-        let text = render(&entries(&p, Shared::default()));
+        let text = render(&entries(&p, Needs::default(), &Defaults::git()));
         assert!(
             text.contains("[user]\n\tname = \"Ada \\\"the\\\" \\\\ Lovelace\"\n\temail"),
             "{text}"
@@ -612,8 +762,10 @@ mod tests {
         acme.remotes = vec!["github.com/acme/*".into()];
         let mut lab = profile("lab", "ada@lab.example");
         lab.remotes = vec!["gitlab.com/**".into()];
+        let mut bucket = profile("bucket", "ada@bucket.example");
+        bucket.remotes = vec!["bitbucket.org".into(), "git.example/[a-c]cme/*".into()];
         let config = Config {
-            profiles: vec![acme, lab],
+            profiles: vec![acme, lab, bucket],
         };
         let global = export_to(&config, &base);
         let urls = [
@@ -638,6 +790,11 @@ mod tests {
             "https://gitlab.com/a/b/c",
             "git@github.com:someone/x.git",
             "git@github.com:acme/api/extra.git",
+            "git@bitbucket.org:team/repo.git",
+            "https://bitbucket.org/team/sub/repo",
+            "git@git.example:Acme/x.git",
+            "https://git.example/BCME/y.GIT",
+            "git@git.example:dcme/z.git",
         ];
         for (n, url) in urls.iter().enumerate() {
             let dir = base.join(format!("r{n}"));
@@ -838,6 +995,86 @@ mod tests {
             git_with(&global, &both, &["config", "user.email"]).1,
             "ada@acme.example"
         );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn defaults_only_where_a_broader_rule_overlaps_and_from_the_global_config() {
+        let base = base("defaults");
+        let mut signer = profile("signer", "s@example.com");
+        signer.paths = vec![format!("{}/a/**", base.display())];
+        signer.sign_commits = Some(true);
+        signer.ssh_key = Some("/keys/s".into());
+        let mut apart = profile("apart", "apart@example.com");
+        apart.paths = vec![format!("{}/b/**", base.display())];
+        let mut inside = profile("inside", "inside@example.com");
+        inside.paths = vec![format!("{}/a/inner/**", base.display())];
+        let config = Config {
+            profiles: vec![signer, apart, inside],
+        };
+        let defaults = Defaults {
+            signing_format: "ssh".into(),
+            sign_commits: "true".into(),
+            ssh_command: "ssh -i ~/.ssh/global".into(),
+        };
+        let out = base.join("out");
+        write_with(&config, &out, &defaults).unwrap();
+        let apart = fs::read_to_string(out.join("profile-apart.gitconfig")).unwrap();
+        assert!(
+            !apart.contains("gpgsign") && !apart.contains("sshCommand"),
+            "{apart}"
+        );
+        let inside = fs::read_to_string(out.join("profile-inside.gitconfig")).unwrap();
+        assert!(inside.contains("gpgsign = \"true\""), "{inside}");
+        assert!(
+            inside.contains("sshCommand = \"ssh -i ~/.ssh/global\""),
+            "{inside}"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn classes_become_case_insensitive_too() {
+        assert_eq!(case_insensitive("[a-c]x"), "[a-cA-C][xX]");
+        assert_eq!(case_insensitive("[!x]y"), "[!xX][yY]");
+        assert_eq!(case_insensitive("[]a]"), "[]aA]");
+        assert_eq!(case_insensitive("a?*"), "[aA]?*");
+    }
+
+    #[test]
+    fn install_handles_duplicates_and_later_includes() {
+        let base = base("install2");
+        let file = base.join("global.gitconfig");
+        let local = base.join("local.gitconfig");
+        let includes = base.join("out/includes.gitconfig");
+        fs::create_dir_all(base.join("out")).unwrap();
+        fs::write(&includes, "").unwrap();
+        fs::write(&local, "[user]\n\temail = local@x\n").unwrap();
+        let ours = quote(&includes.display().to_string());
+        fs::write(
+            &file,
+            format!("[include]\n\tpath = {ours}\n[include]\n\tpath = {ours}\n[user]\n\temail = later@x\n"),
+        )
+        .unwrap();
+        let keys = vec!["user.email".to_string()];
+        assert_eq!(
+            install_into(&file, &includes, &keys).unwrap(),
+            Installed::Moved
+        );
+        let text = fs::read_to_string(&file).unwrap();
+        assert_eq!(text.matches("includes.gitconfig").count(), 1, "{text}");
+
+        let with_local = format!(
+            "{text}[include]\n\tpath = {}\n",
+            quote(&local.display().to_string())
+        );
+        fs::write(&file, with_local).unwrap();
+        assert_eq!(
+            install_into(&file, &includes, &keys).unwrap(),
+            Installed::Moved
+        );
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.trim_end().ends_with("includes.gitconfig\""), "{text}");
         fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -119,11 +119,28 @@ impl fmt::Display for Verdict {
     }
 }
 
+/// In a hook git passes the commit's author in GIT_AUTHOR_*, set from config
+/// unless `--author`, `--amend` or the environment gave another; only then is
+/// the fix the commit's author rather than the repo's profile.
 pub fn run(dir: &Path) -> ExitCode {
     match try_run(dir) {
-        Ok(verdict) if verdict.is_ok() => ExitCode::SUCCESS,
-        Ok(verdict) => {
-            eprintln!("{verdict}");
+        Ok((verdict, _)) if verdict.is_ok() => ExitCode::SUCCESS,
+        Ok((verdict, repo)) => {
+            let text = verdict.to_string();
+            let differs = |var: &str, key: &str| {
+                std::env::var(var).is_ok_and(|v| {
+                    Some(v.as_str()) != repo.effective.settings.get(key).map(String::as_str)
+                })
+            };
+            let from_env = differs("GIT_AUTHOR_NAME", "user.name")
+                || differs("GIT_AUTHOR_EMAIL", "user.email");
+            match (from_env, text.rsplit_once('\n')) {
+                (true, Some((body, _))) => eprintln!(
+                    "{body}\n  this commit's author comes from --author, --amend or \
+                     GIT_AUTHOR_*; give the right one, or use --reset-author with --amend"
+                ),
+                _ => eprintln!("{text}"),
+            }
             ExitCode::from(1)
         }
         Err(err) => {
@@ -133,9 +150,9 @@ pub fn run(dir: &Path) -> ExitCode {
     }
 }
 
-fn try_run(dir: &Path) -> Result<Verdict> {
+fn try_run(dir: &Path) -> Result<(Verdict, Repo)> {
     let (config, repo) = crate::cmd::load(dir)?;
-    Ok(verdict(&config, &repo))
+    Ok((verdict(&config, &repo), repo))
 }
 
 #[cfg(test)]

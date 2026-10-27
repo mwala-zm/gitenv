@@ -118,6 +118,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if matches!(self.mode, Mode::Normal | Mode::Scan(_)) {
+            self.status = None;
+        }
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Help => self.mode = Mode::Normal,
@@ -222,8 +225,8 @@ impl App {
         let on_disk = std::fs::read_to_string(&self.config_path).ok();
         if on_disk != self.config_text {
             return Err(
-                "The config file changed on disk since gitenv read it; nothing was saved. \
-                 Press Esc, then r to reload it"
+                "The profiles file changed on disk since gitenv read it, so nothing was saved. \
+                 Press r to reload it (Esc first to leave the form)"
                     .into(),
             );
         }
@@ -424,7 +427,10 @@ impl App {
         };
         match git::apply(repo, profile) {
             Ok(()) => {
-                self.status = Some(format!("Applied profile '{}' to this repo", profile.name));
+                self.status = Some(match git::still_overridden(&repo.root, profile) {
+                    Some(why) => format!("Applied profile '{}', but {why}", profile.name),
+                    None => format!("Applied profile '{}' to this repo", profile.name),
+                });
                 self.refresh();
             }
             Err(err) => self.status = Some(format!("Failed to apply: {err}")),

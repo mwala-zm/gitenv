@@ -202,7 +202,7 @@ impl Form {
                 .collect()
         };
         let remotes = list(&remotes);
-        let paths = list(&paths);
+        let paths = split_paths(&paths);
         rules::validate(&remotes)?;
         rules::validate_paths(&paths)?;
         let signing_format = match optional(signing_format) {
@@ -242,6 +242,20 @@ impl Form {
             paths,
         })
     }
+}
+
+fn split_paths(s: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut start = 0;
+    for (i, _) in s.match_indices(',') {
+        if s[i + 1..].trim_start().starts_with(['/', '~']) {
+            paths.push(s[start..i].trim().to_string());
+            start = i + 1;
+        }
+    }
+    paths.push(s[start..].trim().to_string());
+    paths.retain(|p| !p.is_empty());
+    paths
 }
 
 /// Splits `k=v, k2=v2` only at commas that start another `key=`, so a value may
@@ -438,5 +452,13 @@ mod tests {
         assert_eq!(profile.git["pull.rebase"], "true");
         let again = Form::edit(0, &profile).to_profile().unwrap();
         assert_eq!(again, profile);
+    }
+
+    #[test]
+    fn path_rules_may_contain_commas() {
+        assert_eq!(
+            split_paths("~/Clients/Smith, Jones/**, /srv/x"),
+            vec!["~/Clients/Smith, Jones/**", "/srv/x"]
+        );
     }
 }

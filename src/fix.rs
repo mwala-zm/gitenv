@@ -19,13 +19,14 @@ pub struct Commit {
     pub parents: usize,
 }
 
+fn git(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root).env("GIT_NO_REPLACE_OBJECTS", "1");
+    cmd
+}
+
 fn git_out(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .context("running git")?;
+    let output = git(root).args(args).output().context("running git")?;
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
@@ -37,9 +38,7 @@ fn git_out(root: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn git_ok(root: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
+    git(root)
         .args(args)
         .output()
         .is_ok_and(|o| o.status.success())
@@ -59,35 +58,37 @@ pub fn target<'a>(config: &'a Config, repo: &Repo) -> Result<&'a Profile> {
 }
 
 fn current_branch(root: &Path) -> Option<String> {
-    git_out(root, &["symbolic-ref", "-q", "--short", "HEAD"])
+    git_out(root, &["symbolic-ref", "-q", "HEAD"])
         .ok()
         .map(|b| b.trim().to_string())
-        .filter(|b| !b.is_empty())
+        .filter(|b| b.starts_with("refs/heads/"))
+}
+
+fn short(branch: &str) -> &str {
+    branch.trim_start_matches("refs/heads/")
 }
 
 /// `rev-list` arguments that leave out every commit something else has:
 /// remote-tracking branches, tags, and local branches other than this one, so
 /// nothing published or shared is rewritten.
-fn published(root: &Path) -> Vec<String> {
+fn published(branch: Option<&str>) -> Vec<String> {
     let mut args = vec!["--not".to_string(), "--remotes".into(), "--tags".into()];
-    if let Some(branch) = current_branch(root) {
-        args.push(format!("--exclude={branch}"));
+    if let Some(branch) = branch {
+        args.push(format!("--exclude={}", short(branch)));
     }
     args.push("--branches".into());
     args
 }
 
-fn unpushed(root: &Path) -> Result<Vec<Commit>> {
-    if !git_ok(root, &["rev-parse", "--verify", "-q", "HEAD"]) {
-        return Ok(Vec::new());
-    }
+fn unpushed(root: &Path, branch: Option<&str>) -> Result<Vec<Commit>> {
     let mut args = vec![
         "log".to_string(),
         "--reverse".into(),
         "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce%x00%s".into(),
         "HEAD".into(),
     ];
-    args.extend(published(root));
+    args.extend(published(branch));
+    args.push("--".into());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let text = git_out(root, &args)?;
     Ok(text
@@ -112,14 +113,28 @@ fn unpushed(root: &Path) -> Result<Vec<Commit>> {
 pub struct Plan {
     pub unpushed: Vec<Commit>,
     pub wrong: Vec<Commit>,
+    head: String,
+    branch: Option<String>,
 }
 
 fn is_profile(name: &str, email: &str, profile: &Profile) -> bool {
-    name == profile.user_name && email.eq_ignore_ascii_case(&profile.email)
+    name == git::as_git_writes(&profile.user_name) && email.eq_ignore_ascii_case(&profile.email)
 }
 
 pub fn plan(root: &Path, profile: &Profile) -> Result<Plan> {
-    let unpushed = unpushed(root)?;
+    let head = match git_out(root, &["rev-parse", "--verify", "-q", "HEAD"]) {
+        Ok(head) => head.trim().to_string(),
+        Err(_) => {
+            return Ok(Plan {
+                unpushed: Vec::new(),
+                wrong: Vec::new(),
+                head: String::new(),
+                branch: None,
+            });
+        }
+    };
+    let branch = current_branch(root);
+    let unpushed = unpushed(root, branch.as_deref())?;
     let wrong = unpushed
         .iter()
         .filter(|c| {
@@ -128,7 +143,12 @@ pub fn plan(root: &Path, profile: &Profile) -> Result<Plan> {
         })
         .cloned()
         .collect();
-    Ok(Plan { unpushed, wrong })
+    Ok(Plan {
+        unpushed,
+        wrong,
+        head,
+        branch,
+    })
 }
 
 fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
@@ -141,10 +161,11 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 /// Refuses while git is in the middle of a rebase, merge, cherry-pick, revert
-/// or bisect; when the branch tracks a remote branch this clone has no copy of,
-/// as in a single-branch clone, since it may be pushed without gitenv seeing
-/// it; when the commits include a merge; and when they reach a shallow clone's
-/// cut-off.
+/// or bisect; with old-style grafts, which git log follows but the rebuilt
+/// commits could not; when the branch tracks a remote branch this clone has no
+/// copy of, as in a single-branch clone, since it may be pushed without gitenv
+/// seeing it; when the commits include a merge; and when they reach a shallow
+/// clone's cut-off.
 fn preflight(root: &Path, plan: &Plan) -> Result<()> {
     for (name, what) in [
         ("rebase-merge", "a rebase"),
@@ -158,15 +179,24 @@ fn preflight(root: &Path, plan: &Plan) -> Result<()> {
             bail!("git is in the middle of {what}; finish or abort it first");
         }
     }
-    if let Some(branch) = current_branch(root)
+    if git_path(root, "info/grafts")?.exists() {
+        bail!(
+            "this repository uses .git/info/grafts; convert them with `git replace --convert-graft-file` first"
+        );
+    }
+    if let Some(branch) = plan.branch.as_deref().map(short)
         && let Ok(remote) = git_out(root, &["config", &format!("branch.{branch}.remote")])
         && remote.trim() != "."
         && !git_ok(root, &["rev-parse", "--verify", "-q", "@{upstream}"])
     {
+        let remote = remote.trim();
+        let merge =
+            git_out(root, &["config", &format!("branch.{branch}.merge")]).unwrap_or_default();
+        let upstream = merge.trim().trim_start_matches("refs/heads/");
         bail!(
-            "{branch} tracks a branch on '{}' that this clone has no copy of, so gitenv \
-             cannot tell which commits are pushed; run `git fetch` and try again",
-            remote.trim()
+            "{branch} tracks {upstream} on '{remote}', which this clone keeps no copy of, so \
+             gitenv cannot tell which commits are pushed; fetch it with \
+             `git fetch {remote} {upstream}:refs/remotes/{remote}/{upstream}` and try again"
         );
     }
     if plan.unpushed.iter().any(|c| c.parents > 1) {
@@ -188,8 +218,9 @@ fn preflight(root: &Path, plan: &Plan) -> Result<()> {
 struct Raw {
     tree: String,
     parents: Vec<String>,
-    author: String,
+    author: Vec<u8>,
     encoding: Option<String>,
+    others: Vec<u8>,
     message: Vec<u8>,
 }
 
@@ -197,9 +228,7 @@ struct Raw {
 /// commit <size>` headers. The hashes are written from a thread so a large
 /// batch cannot fill both pipes.
 fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let mut child = git(root)
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -234,31 +263,47 @@ fn read_commits(root: &Path, hashes: &[&str]) -> Result<Vec<Raw>> {
     Ok(commits)
 }
 
-/// Signature headers (gpgsig, mergetag) and their continuation lines are
-/// dropped: the rebuilt commit is a different one, so they would no longer be
-/// valid.
+/// Splits a raw commit into the headers gitenv rewrites (tree, parents,
+/// author, committer), the encoding, and every other header, kept as bytes
+/// with its continuation lines. Signature headers (gpgsig, gpgsig-sha256,
+/// mergetag) are dropped: the rebuilt commit is a different one, so they
+/// would no longer be valid.
 fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
     let split = bytes
         .windows(2)
         .position(|w| w == b"\n\n")
-        .map_or(bytes.len(), |i| i + 2);
-    let headers = String::from_utf8_lossy(&bytes[..split]).to_string();
+        .map_or(bytes.len(), |i| i + 1);
     let mut raw = Raw {
         tree: String::new(),
         parents: Vec::new(),
-        author: String::new(),
+        author: Vec::new(),
         encoding: None,
-        message: bytes[split..].to_vec(),
+        others: Vec::new(),
+        message: bytes.get(split + 1..).unwrap_or_default().to_vec(),
     };
-    for line in headers.lines() {
-        if let Some(v) = line.strip_prefix("tree ") {
-            raw.tree = v.to_string();
-        } else if let Some(v) = line.strip_prefix("parent ") {
-            raw.parents.push(v.to_string());
-        } else if let Some(v) = line.strip_prefix("author ") {
-            raw.author = v.to_string();
-        } else if let Some(v) = line.strip_prefix("encoding ") {
-            raw.encoding = Some(v.to_string());
+    let mut skipping = false;
+    for line in bytes[..split].split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b" ") {
+            if !skipping {
+                raw.others.extend_from_slice(line);
+            }
+            continue;
+        }
+        let text = String::from_utf8_lossy(line);
+        let text = text.trim_end_matches('\n');
+        let (key, value) = text.split_once(' ').unwrap_or((text, ""));
+        skipping = false;
+        match key {
+            "tree" => raw.tree = value.to_string(),
+            "parent" => raw.parents.push(value.to_string()),
+            "author" => raw.author = line[7..].strip_suffix(b"\n").unwrap_or(&line[7..]).to_vec(),
+            "committer" => {}
+            "gpgsig" | "gpgsig-sha256" | "mergetag" => skipping = true,
+            "encoding" => {
+                raw.encoding = Some(value.to_string());
+                raw.others.extend_from_slice(line);
+            }
+            _ => raw.others.extend_from_slice(line),
         }
     }
     if raw.tree.is_empty() || raw.author.is_empty() {
@@ -267,29 +312,139 @@ fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-fn split_ident(ident: &str) -> Option<(&str, &str, &str)> {
-    let open = ident.rfind('<')?;
-    let close = ident.rfind('>')?;
-    Some((
-        ident[..open].trim_end(),
-        &ident[open + 1..close],
-        ident[close + 1..].trim(),
-    ))
+/// `name` as the bytes a commit in `encoding` should hold: Latin-1 for an
+/// ISO-8859-1 commit when every character fits, else UTF-8, as git writes.
+fn encode(name: &str, encoding: Option<&str>) -> Vec<u8> {
+    let latin1 = encoding.is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "iso-8859-1" | "iso8859-1" | "latin1" | "latin-1"
+        )
+    });
+    if latin1 && name.chars().all(|c| (c as u32) < 256) {
+        name.chars().map(|c| c as u8).collect()
+    } else {
+        name.as_bytes().to_vec()
+    }
 }
 
-/// Rebuilds the unpushed commits from the first wrong one on with `git
-/// commit-tree`, from their own trees and exact message bytes, with the profile
-/// as author of each wrong one (keeping its author date) and as committer of
-/// all of them. HEAD then moves once with `update-ref`, which fails if it moved
-/// meanwhile. The work tree, index, ignored files and hooks are never touched,
-/// and the profile is applied only after all that worked.
+fn ident(name: &[u8], email: &str, date: &[u8]) -> Vec<u8> {
+    let mut out = name.to_vec();
+    out.extend_from_slice(format!(" <{email}> ").as_bytes());
+    out.extend_from_slice(date);
+    out
+}
+
+fn date_of(ident: &[u8]) -> &[u8] {
+    match ident.iter().rposition(|&b| b == b'>') {
+        Some(i) => ident[i + 1..].trim_ascii(),
+        None => b"",
+    }
+}
+
+/// Writes one commit object: with `git commit-tree` when it must be signed,
+/// otherwise byte for byte with `git hash-object`, which keeps every other
+/// header (jj's change-id, say) and the exact message.
+fn write_commit(
+    root: &Path,
+    raw: &Raw,
+    parents: &[String],
+    author: &[u8],
+    committer: &[u8],
+    sign: Option<&[String]>,
+) -> Result<String> {
+    let mut cmd = git(root);
+    let mut input = Vec::new();
+    match sign {
+        Some(settings) => {
+            for setting in settings {
+                cmd.args(["-c", setting]);
+            }
+            if let Some(encoding) = &raw.encoding {
+                cmd.args(["-c", &format!("i18n.commitEncoding={encoding}")]);
+            }
+            cmd.args(["commit-tree", &raw.tree, "-S"]);
+            for parent in parents {
+                cmd.args(["-p", parent]);
+            }
+            let (name, rest) = split_at_email(author);
+            let (cname, crest) = split_at_email(committer);
+            cmd.env("GIT_AUTHOR_NAME", String::from_utf8_lossy(name).as_ref())
+                .env("GIT_AUTHOR_EMAIL", rest.0)
+                .env("GIT_AUTHOR_DATE", format!("@{}", rest.1))
+                .env(
+                    "GIT_COMMITTER_NAME",
+                    String::from_utf8_lossy(cname).as_ref(),
+                )
+                .env("GIT_COMMITTER_EMAIL", crest.0);
+            input.extend_from_slice(&raw.message);
+        }
+        None => {
+            cmd.args(["hash-object", "-t", "commit", "-w", "--stdin"]);
+            input.extend_from_slice(format!("tree {}\n", raw.tree).as_bytes());
+            for parent in parents {
+                input.extend_from_slice(format!("parent {parent}\n").as_bytes());
+            }
+            input.extend_from_slice(b"author ");
+            input.extend_from_slice(author);
+            input.extend_from_slice(b"\ncommitter ");
+            input.extend_from_slice(committer);
+            input.push(b'\n');
+            input.extend_from_slice(&raw.others);
+            input.push(b'\n');
+            input.extend_from_slice(&raw.message);
+        }
+    }
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running git")?;
+    child
+        .stdin
+        .take()
+        .context("writing to git")?
+        .write_all(&input)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!(
+            "writing a commit failed, nothing was changed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn split_at_email(ident: &[u8]) -> (&[u8], (String, String)) {
+    let open = ident.iter().rposition(|&b| b == b'<').unwrap_or(0);
+    let close = ident
+        .iter()
+        .rposition(|&b| b == b'>')
+        .unwrap_or(ident.len());
+    let email = String::from_utf8_lossy(&ident[(open + 1).min(close)..close]).to_string();
+    let date = String::from_utf8_lossy(date_of(ident)).to_string();
+    (ident[..open].trim_ascii_end(), (email, date))
+}
+
+/// Rebuilds the unpushed commits from the first wrong one on, from their own
+/// trees, headers and exact message bytes, with the profile as author of each
+/// one whose author is wrong (keeping its date) and as committer of all of
+/// them. git runs with replace objects off so their content is never baked
+/// in. The branch HEAD was on when planning then moves once with
+/// `update-ref` from exactly the planned tip, so a commit or branch switch
+/// made meanwhile makes it refuse. The work tree, index, ignored files and
+/// hooks are never touched, and the profile is applied only after all that
+/// worked.
 pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
     let root = &repo.root;
     preflight(root, plan)?;
     let Some(first) = plan.wrong.first() else {
         return Ok(());
     };
-    let old_head = git_out(root, &["rev-parse", "HEAD"])?.trim().to_string();
+    if current_branch(root) != plan.branch {
+        bail!("HEAD moved to another branch since gitenv looked; nothing was changed");
+    }
     let start = plan
         .unpushed
         .iter()
@@ -307,6 +462,15 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
     if let Some(format) = profile.signing_format {
         settings.push(format!("gpg.format={}", format.as_git()));
     }
+    let now = git(root)
+        .args(["var", "GIT_COMMITTER_IDENT"])
+        .env("GIT_COMMITTER_NAME", &profile.user_name)
+        .env("GIT_COMMITTER_EMAIL", &profile.email)
+        .output()
+        .context("running git var")?
+        .stdout;
+    let now = date_of(&now).to_vec();
+    let name = git::as_git_writes(&profile.user_name);
 
     let todo = &plan.unpushed[start..];
     let hashes: Vec<&str> = todo.iter().map(|c| c.hash.as_str()).collect();
@@ -317,52 +481,33 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
         if progress && i % 100 == 0 {
             eprint!("\rgitenv: rewriting commit {} of {}", i + 1, todo.len());
         }
-        let (name, email, date) =
-            split_ident(&raw.author).context("could not read a commit's author")?;
-        let (name, email) = if is_profile(name, email, profile) {
-            (name.to_string(), email.to_string())
+        let encoding = raw.encoding.as_deref();
+        let author = if is_profile(&commit.author, &commit.email, profile) {
+            raw.author.clone()
         } else {
-            (profile.user_name.clone(), profile.email.clone())
+            ident(
+                &encode(name, encoding),
+                &profile.email,
+                date_of(&raw.author),
+            )
         };
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(root);
-        for setting in &settings {
-            cmd.args(["-c", setting]);
-        }
-        if let Some(encoding) = &raw.encoding {
-            cmd.args(["-c", &format!("i18n.commitEncoding={encoding}")]);
-        }
-        cmd.args(["commit-tree", &raw.tree]);
-        for parent in &raw.parents {
-            let parent = match &replaced {
-                Some((old, new)) if old == parent => new,
-                _ => parent,
-            };
-            cmd.args(["-p", parent]);
-        }
-        cmd.arg(if sign { "-S" } else { "--no-gpg-sign" });
-        cmd.env("GIT_AUTHOR_NAME", &name)
-            .env("GIT_AUTHOR_EMAIL", &email)
-            .env("GIT_AUTHOR_DATE", format!("@{date}"))
-            .env("GIT_COMMITTER_NAME", &profile.user_name)
-            .env("GIT_COMMITTER_EMAIL", &profile.email)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().context("running git commit-tree")?;
-        child
-            .stdin
-            .take()
-            .context("writing to git commit-tree")?
-            .write_all(&raw.message)?;
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            bail!(
-                "git commit-tree failed, nothing was changed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let new = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let committer = ident(&encode(name, encoding), &profile.email, &now);
+        let parents: Vec<String> = raw
+            .parents
+            .iter()
+            .map(|p| match &replaced {
+                Some((old, new)) if old == p => new.clone(),
+                _ => p.clone(),
+            })
+            .collect();
+        let new = write_commit(
+            root,
+            &raw,
+            &parents,
+            &author,
+            &committer,
+            sign.then_some(settings.as_slice()),
+        )?;
         replaced = Some((commit.hash.clone(), new));
     }
 
@@ -370,18 +515,22 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
         eprintln!("\rgitenv: rewrote {} commits{:10}", todo.len(), "");
     }
     let (_, new_head) = replaced.context("nothing was rebuilt")?;
-    git_out(
-        root,
-        &[
-            "update-ref",
-            "-m",
-            "gitenv fix-authors: re-author unpushed commits",
-            "HEAD",
-            &new_head,
-            &old_head,
-        ],
-    )
-    .context("moving HEAD; it changed while gitenv was working, so nothing was changed")?;
+    let target = plan.branch.as_deref().unwrap_or("HEAD");
+    let mut args = vec![
+        "update-ref",
+        "-m",
+        "gitenv fix-authors: re-author unpushed commits",
+    ];
+    if plan.branch.is_none() {
+        args.push("--no-deref");
+    }
+    args.extend([target, new_head.as_str(), plan.head.as_str()]);
+    git_out(root, &args).with_context(|| {
+        format!(
+            "moving {target} failed: it changed since gitenv looked, or a hook refused; \
+             nothing was changed"
+        )
+    })?;
     git::apply(repo, profile).context("commits rewritten, but applying the profile failed")?;
     Ok(())
 }
@@ -801,5 +950,137 @@ mod tests {
     fn fix_wrong_after(dir: &Path) -> Result<()> {
         commit(dir, "ada@example.com", "wrong");
         fix(dir)
+    }
+
+    #[test]
+    fn refuses_when_head_moved_since_planning() {
+        let dir = base("moved");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit(&dir, "ada@acme.example", "base");
+        git(&dir, &["tag", "v0"]);
+        commit(&dir, "ada@example.com", "wrong");
+        git(&dir, &["branch", "other", "v0"]);
+        let repo = git::discover(&dir).unwrap().unwrap();
+        let planned = plan(&dir, &acme()).unwrap();
+
+        git(&dir, &["switch", "-q", "other"]);
+        commit(&dir, "ada@acme.example", "precious");
+        let other = git(&dir, &["rev-parse", "other"]);
+        let err = rewrite(&repo, &acme(), &planned).unwrap_err().to_string();
+        assert!(err.contains("another branch"), "{err}");
+        assert_eq!(git(&dir, &["rev-parse", "other"]), other);
+
+        git(&dir, &["switch", "-q", "main"]);
+        commit(&dir, "ada@acme.example", "made while asking");
+        let main = git(&dir, &["rev-parse", "main"]);
+        let err = rewrite(&repo, &acme(), &planned).unwrap_err().to_string();
+        assert!(err.contains("nothing was changed"), "{err}");
+        assert_eq!(git(&dir, &["rev-parse", "main"]), main);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn hash_object(dir: &Path, text: &str) -> String {
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap().stdout;
+        String::from_utf8(out).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn replace_objects_are_not_baked_in_and_other_headers_are_kept() {
+        let dir = base("replace");
+        let real = |dir: &Path, rev: &str| {
+            git_env(
+                dir,
+                &["cat-file", "commit", rev],
+                &[("GIT_NO_REPLACE_OBJECTS", "1")],
+            ) + "\n"
+        };
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit(&dir, "ada@example.com", "a");
+        commit(&dir, "ada@example.com", "b original");
+        let b = git(&dir, &["rev-parse", "HEAD"]);
+        commit(&dir, "ada@example.com", "c");
+        let c = git(&dir, &["rev-parse", "HEAD"]);
+        let fake = hash_object(&dir, &real(&dir, &b).replace("b original", "b REPLACEMENT"));
+        git(&dir, &["replace", &b, &fake]);
+        let tip = hash_object(
+            &dir,
+            &real(&dir, &c).replacen("\n\n", "\nchange-id zyxwvutsrqponmlk\n\n", 1),
+        );
+        git(&dir, &["update-ref", "refs/heads/main", &tip]);
+
+        fix(&dir).unwrap();
+        let log = git_env(
+            &dir,
+            &["log", "--format=%s %ae"],
+            &[("GIT_NO_REPLACE_OBJECTS", "1")],
+        );
+        assert_eq!(
+            log,
+            "c ada@acme.example\nb original ada@acme.example\na ada@acme.example"
+        );
+        assert!(real(&dir, "HEAD").contains("\nchange-id zyxwvutsrqponmlk\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_branch_named_like_a_tag_and_a_file_named_head() {
+        let dir = base("names");
+        git(&dir, &["init", "-q", "-b", "main"]);
+        commit(&dir, "ada@acme.example", "a");
+        git(&dir, &["tag", "main"]);
+        commit(&dir, "ada@example.com", "b");
+        std::fs::write(dir.join("HEAD"), "x").unwrap();
+        let planned = plan(&dir, &acme()).unwrap();
+        assert_eq!(planned.wrong.len(), 1);
+        fix(&dir).unwrap();
+        assert!(plan_is_clean(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn latin1_commits_and_trimmed_names_are_clean_after_one_run() {
+        let dir = base("latin1");
+        git(&dir, &["init", "-q"]);
+        git(
+            &dir,
+            &[
+                "-c",
+                "i18n.commitEncoding=ISO-8859-1",
+                "-c",
+                "user.name=Bob",
+                "-c",
+                "user.email=bob@old.example",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        );
+        let mut jose = acme();
+        jose.user_name = "José ".into();
+        let repo = git::discover(&dir).unwrap().unwrap();
+        let planned = plan(&dir, &jose).unwrap();
+        rewrite(&repo, &jose, &planned).unwrap();
+        assert!(
+            plan(&dir, &jose).unwrap().wrong.is_empty(),
+            "second run is a no-op"
+        );
+        assert_eq!(git(&dir, &["log", "-1", "--format=%an"]), "José");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

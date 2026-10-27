@@ -35,6 +35,14 @@ pub fn normalize_key(key: &str) -> String {
     )
 }
 
+/// `name` as git writes it into a commit, without the characters it drops
+/// from both ends.
+pub fn as_git_writes(name: &str) -> &str {
+    name.trim_matches(|c: char| {
+        c <= ' ' || matches!(c, ',' | ':' | ';' | '<' | '>' | '"' | '\\' | '\'')
+    })
+}
+
 pub fn git_bool(s: &str) -> Option<bool> {
     match s.trim().to_ascii_lowercase().as_str() {
         "true" | "yes" | "on" | "1" => Some(true),
@@ -100,6 +108,12 @@ impl Repo {
     pub fn identity_source(&self) -> &'static str {
         if author_env("GIT_AUTHOR_NAME").is_some() || author_env("GIT_AUTHOR_EMAIL").is_some() {
             "the GIT_AUTHOR_* environment variables"
+        } else if self.local.name.is_none()
+            && self.local.email.is_none()
+            && self.effective.name.is_none()
+            && self.effective.email.is_none()
+        {
+            "nowhere: no name or email is set"
         } else if self.local.name.is_some() || self.local.email.is_some() {
             "this repo's config"
         } else if self.effective.email.is_none() && author_env("EMAIL").is_some() {
@@ -295,6 +309,22 @@ pub fn valid_key(key: &str) -> bool {
         && word(name)
         && name.starts_with(|c: char| c.is_ascii_alphabetic())
         && !key[first..=last].contains(['\n', '\0'])
+}
+
+/// Why git would still not commit as `profile` after it was applied to the
+/// repository at `root`: worktree config or the environment wins over local
+/// config. `None` when it would.
+pub fn still_overridden(root: &Path, profile: &Profile) -> Option<String> {
+    let repo = open(root.to_path_buf(), 0)?;
+    if repo.effective.matches(profile) {
+        return None;
+    }
+    Some(format!(
+        "git still commits as {} <{}> from {}",
+        repo.effective.name.as_deref().unwrap_or("(no name)"),
+        repo.effective.email.as_deref().unwrap_or("(no email)"),
+        repo.identity_source()
+    ))
 }
 
 /// Writes the profile into the repo's local config and unsets the identity keys

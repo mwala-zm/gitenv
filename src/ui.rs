@@ -8,6 +8,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::app::{App, Mode, ScanView};
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
+use crate::rules;
 use crate::scan;
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -106,7 +107,7 @@ fn render_help(frame: &mut Frame) {
         ("e", "edit the selected profile"),
         ("n", "create a new profile"),
         ("d", "delete the selected profile"),
-        ("r", "re-read the repository"),
+        ("r", "re-read the repo and the profiles file"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -167,7 +168,16 @@ fn render_confirm_delete(frame: &mut Frame, app: &App) {
 
 fn render_form(frame: &mut Frame, form: &Form) {
     let label_width = LABEL_WIDTH;
-    let area = centered(frame.area(), 78, LABELS.len() as u16 + 4);
+    let width = 78.min(frame.area().width);
+    let notes = match &form.error {
+        Some(err) => wrap(err, (width as usize).saturating_sub(2)),
+        None => vec!["Tab/↓ next field   ←→ Home End move   Enter save   Esc cancel".to_string()],
+    };
+    let area = centered(
+        frame.area(),
+        width,
+        LABELS.len() as u16 + 3 + notes.len() as u16,
+    );
     let value_width = (area.width as usize).saturating_sub(2 + label_width + 1);
 
     let mut lines: Vec<Line> = LABELS
@@ -188,10 +198,13 @@ fn render_form(frame: &mut Frame, form: &Form) {
         })
         .collect();
     lines.push(Line::from(""));
-    lines.push(match &form.error {
-        Some(err) => Line::from(err.clone().red()),
-        None => Line::from("Tab/↓ next field   ←→ Home End move   Enter save   Esc cancel".dim()),
-    });
+    for note in notes {
+        lines.push(if form.error.is_some() {
+            Line::from(note.red())
+        } else {
+            Line::from(note.dim())
+        });
+    }
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -207,6 +220,22 @@ fn render_form(frame: &mut Frame, form: &Form) {
     }
 }
 
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = vec![String::new()];
+    for word in text.split(' ') {
+        let line = lines.last_mut().unwrap();
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(word.to_string());
+        } else {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+    }
+    lines
+}
+
 /// The part of `value` that fits in `width` columns, scrolled so the cursor (a
 /// character index, if this field has it) stays in view with a spare cell, and
 /// the cursor's column within it. Wide characters such as CJK take two columns.
@@ -216,7 +245,10 @@ fn visible(value: &str, cursor: Option<usize>, width: usize) -> (String, usize) 
     let cursor = cursor.map(|c| c.min(chars.len()));
     let mut offset = 0;
     if let Some(cursor) = cursor {
-        while offset < cursor && cols(&chars[offset..cursor]) + 1 > width {
+        let under = chars
+            .get(cursor)
+            .map_or(1, |c| c.width().unwrap_or(1).max(1));
+        while offset < cursor && cols(&chars[offset..cursor]) + under > width {
             offset += 1;
         }
     }
@@ -388,7 +420,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut lines = vec![
         field("root", &Some(repo.root.display().to_string())),
-        field("remote", &repo.remote),
+        field("remote", &repo.remote.as_deref().map(rules::hide_password)),
         Line::from(""),
         Line::from("Effective identity".bold()),
         field("name", &repo.effective.name),
@@ -822,5 +854,19 @@ mod tests {
         app.selected = 1;
         let path = std::env::var("GITENV_SCREENSHOT").unwrap_or_else(|_| "docs/tui.svg".into());
         std::fs::write(&path, to_svg(&app, 100, 24)).unwrap();
+    }
+
+    #[test]
+    fn long_form_errors_wrap() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut form = Form::edit(1, &profiles()[1]);
+        form.error = Some(
+            "The profiles file changed on disk since gitenv read it, so nothing was saved. \
+             Press r to reload it (Esc first to leave the form)"
+                .into(),
+        );
+        app.mode = Mode::Edit(Box::new(form));
+        let screen = draw(&app);
+        assert!(screen.contains("Press r to reload it"), "{screen}");
     }
 }
