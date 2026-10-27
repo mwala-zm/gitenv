@@ -460,8 +460,8 @@ cargo run          # launch the TUI in this repo
 cargo test         # the tests; many drive real git in throwaway repos
 ```
 
-The tests never touch your own git config or profiles: each one works in a
-fresh folder under the system temp directory.
+The tests never change your own git config or profiles: each one works in
+a fresh folder under the system temp directory.
 
 ### Before opening a pull request
 

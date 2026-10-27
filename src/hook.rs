@@ -360,7 +360,7 @@ mod tests {
         let hooks = dir.join(".git/hooks");
         fs::write(hooks.join("pre-push"), "#!/bin/sh\nmake test\n").unwrap();
 
-        let out = install(&dir, false).unwrap();
+        let out = write_hooks(&hooks, false).unwrap().join("\n");
         assert!(out.contains("wrote"), "{out}");
         assert!(out.contains("left") && out.contains("pre-push"), "{out}");
         let pre_commit = fs::read_to_string(hooks.join("pre-commit")).unwrap();
@@ -383,9 +383,14 @@ mod tests {
             assert_eq!(mode & 0o111, 0o111);
         }
 
-        assert!(install(&dir, false).unwrap().contains("wrote"));
+        assert!(
+            write_hooks(&hooks, false)
+                .unwrap()
+                .join("\n")
+                .contains("wrote")
+        );
 
-        let out = remove(&dir, false).unwrap();
+        let out = remove_hooks(&hooks).join("\n");
         assert!(out.contains("removed"), "{out}");
         assert!(!hooks.join("pre-commit").exists());
         assert!(hooks.join("pre-push").exists());
@@ -509,16 +514,17 @@ mod tests {
     #[test]
     fn edited_hooks_are_neither_replaced_nor_removed() {
         let dir = repo("edited");
-        let hook = dir.join(".git/hooks/pre-commit");
-        install(&dir, false).unwrap();
+        let hooks = dir.join(".git/hooks");
+        let hook = hooks.join("pre-commit");
+        write_hooks(&hooks, false).unwrap();
         let mut text = fs::read_to_string(&hook).unwrap();
         text.push_str("make lint || exit 1\n");
         fs::write(&hook, &text).unwrap();
 
-        let out = install(&dir, false).unwrap();
+        let out = write_hooks(&hooks, false).unwrap().join("\n");
         assert!(out.contains("edited since gitenv wrote it"), "{out}");
         assert_eq!(fs::read_to_string(&hook).unwrap(), text);
-        let out = remove(&dir, false).unwrap();
+        let out = remove_hooks(&hooks).join("\n");
         assert!(out.contains("edited since gitenv wrote it"), "{out}");
         assert!(hook.exists());
         assert!(
