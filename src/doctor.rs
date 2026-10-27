@@ -74,6 +74,12 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
         for e in checks.into_iter().filter_map(Result::err) {
             out.push(fail(format!("'{}': {e}", p.name)));
         }
+        for key in p.git.keys().filter(|k| !git::valid_key(k)) {
+            out.push(fail(format!(
+                "'{}': '{key}' under [profiles.git] is not a git config key",
+                p.name
+            )));
+        }
     }
     out
 }
@@ -336,6 +342,7 @@ mod tests {
         twin.name = "acme-old".into();
         let mut bad = profile("bad");
         bad.paths = vec!["[oops".into()];
+        bad.git.insert("core".into(), "x".into());
         let config = Config {
             profiles: vec![profile("acme"), twin, profile("acme"), bad],
         };
@@ -350,5 +357,9 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("fail  'bad': Bad pattern '[oops'"), "{text}");
+        assert!(
+            text.contains("'core' under [profiles.git] is not a git config key"),
+            "{text}"
+        );
     }
 }
