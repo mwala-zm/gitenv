@@ -291,7 +291,31 @@ pub fn global_identity() -> Identity {
     read_identity(&cwd, &["--global"])
 }
 
+/// Whether git accepts `key` as a config key: `section.name` or
+/// `section.subsection.name`, the section and name made of letters,
+/// digits and `-`, the name starting with a letter.
+pub fn valid_key(key: &str) -> bool {
+    let (Some(first), Some(last)) = (key.find('.'), key.rfind('.')) else {
+        return false;
+    };
+    let section = &key[..first];
+    let name = &key[last + 1..];
+    let word = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    word(section)
+        && word(name)
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !key[first..=last].contains(['\n', '\0'])
+}
+
 pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
+    // Check every key before writing any, so a bad one cannot leave the
+    // repo half on one profile and half on another.
+    if let Some(bad) = profile.git.keys().find(|k| !valid_key(k)) {
+        bail!(
+            "profile '{}' has '{bad}' under [profiles.git], which is not a git config key",
+            profile.name
+        );
+    }
     config_set(&repo.root, "user.name", &profile.user_name)?;
     config_set(&repo.root, "user.email", &profile.email)?;
     match &profile.signing_key {
@@ -314,24 +338,58 @@ pub fn apply(repo: &Repo, profile: &Profile) -> Result<()> {
         )?,
         None => config_unset(&repo.root, "commit.gpgsign")?,
     }
-    // Remember which extra keys this profile wrote, so applying another
-    // profile later removes them instead of leaving them behind.
-    let wanted: Vec<String> = profile.git.keys().map(|k| normalize_key(k)).collect();
-    for key in config_get_all(&repo.root, MANAGED) {
-        if !wanted.contains(&normalize_key(&key)) {
-            config_unset_all(&repo.root, &key)?;
-        }
-    }
-    config_unset_all(&repo.root, MANAGED)?;
-    for (key, value) in &profile.git {
-        config_set(&repo.root, key, value)?;
-        config_add(&repo.root, MANAGED, key)?;
-    }
-    Ok(())
+    apply_extra_keys(&repo.root, profile)
 }
 
 /// Multi-valued local key listing the `[profiles.git]` keys gitenv wrote.
 const MANAGED: &str = "gitenv.managed";
+/// Multi-valued local key holding `key\nvalue` for each value the user had
+/// set themselves before gitenv overwrote it; neither part can contain a
+/// newline, git stores it escaped.
+const BACKUP: &str = "gitenv.backup";
+
+/// Write the profile's `[profiles.git]` keys. Keys an earlier profile
+/// wrote and this one does not set are removed, and any value the user
+/// had there before gitenv first wrote the key is put back.
+fn apply_extra_keys(root: &Path, profile: &Profile) -> Result<()> {
+    let wanted: Vec<String> = profile.git.keys().map(|k| normalize_key(k)).collect();
+    let managed: Vec<String> = config_get_all(root, MANAGED)
+        .iter()
+        .map(|k| normalize_key(k))
+        .collect();
+    let mut backups: Vec<(String, String)> = config_get_all(root, BACKUP)
+        .iter()
+        .filter_map(|entry| {
+            let (k, v) = entry.split_once('\n')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect();
+
+    for key in managed.iter().filter(|k| !wanted.contains(k)) {
+        config_unset_all(root, key)?;
+        for (_, value) in backups.iter().filter(|(k, _)| k == key) {
+            config_add(root, key, value)?;
+        }
+        backups.retain(|(k, _)| k != key);
+    }
+    // Keys gitenv is about to take over: keep what the user had.
+    for key in wanted.iter().filter(|k| !managed.contains(k)) {
+        for value in config_get_all(root, key) {
+            backups.push((key.clone(), value));
+        }
+    }
+
+    config_unset_all(root, BACKUP)?;
+    for (key, value) in &backups {
+        config_add(root, BACKUP, &format!("{key}\n{value}"))?;
+    }
+    config_unset_all(root, MANAGED)?;
+    for (key, value) in &profile.git {
+        config_set(root, key, value)?;
+        config_add(root, MANAGED, key)?;
+    }
+    Ok(())
+}
 
 /// The `core.sshCommand` value that makes git offer `key` and nothing else.
 /// The path is single-quoted so spaces survive, and a leading `~` is
@@ -436,7 +494,7 @@ fn config_set(root: &Path, key: &str, value: &str) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["config", "--local", key, value])
+        .args(["config", "--local", "--replace-all", key, value])
         .status()
         .context("running git config")?;
     if !status.success() {
@@ -452,11 +510,17 @@ fn config_get_all(root: &Path, key: &str) -> Vec<String> {
         .args(["config", "--local", "--get-all", "-z", key])
         .output();
     match output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .split('\0')
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-            .collect(),
+        // Each value ends in `\0`; an empty value is meaningful (an empty
+        // credential.helper clears inherited ones), so only the final
+        // terminator is dropped.
+        Ok(output) if output.status.success() && !output.stdout.is_empty() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            text.strip_suffix('\0')
+                .unwrap_or(&text)
+                .split('\0')
+                .map(str::to_owned)
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -868,5 +932,90 @@ mod tests {
         assert!(open(dir.clone(), 0).is_some());
         assert!(open(std::env::temp_dir(), 0).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn switching_profiles_restores_what_the_user_had() {
+        let dir = std::env::temp_dir().join(format!("gitenv-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&dir)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["init", "-q"]);
+        git(&["config", "pull.rebase", "false"]);
+        git(&["config", "--add", "credential.helper", ""]);
+        git(&["config", "--add", "credential.helper", "osxkeychain"]);
+        git(&["config", "--add", "user.signingkey", "A"]);
+        git(&["config", "--add", "user.signingkey", "B"]);
+
+        let mut acme = profile(Some("ACMEKEY"));
+        acme.git.insert("Pull.Rebase".into(), "true".into());
+        acme.git.insert("credential.helper".into(), "store".into());
+        let repo = discover(&dir).unwrap().unwrap();
+        apply(&repo, &acme).unwrap();
+        let all = |key: &str| config_get_all(&dir, key);
+        assert_eq!(all("pull.rebase"), vec!["true"]);
+        assert_eq!(all("credential.helper"), vec!["store"]);
+        assert_eq!(
+            all("user.signingkey"),
+            vec!["ACMEKEY"],
+            "multi-valued key replaced"
+        );
+
+        // Re-applying the same profile must not back up its own values.
+        apply(&repo, &acme).unwrap();
+        apply(&repo, &profile(None)).unwrap();
+        assert_eq!(all("pull.rebase"), vec!["false"]);
+        assert_eq!(all("credential.helper"), vec!["", "osxkeychain"]);
+        assert!(all(BACKUP).is_empty());
+        assert!(all(MANAGED).is_empty());
+
+        let mut bad = profile(None);
+        bad.git.insert("core".into(), "x".into());
+        bad.email = "changed@example.com".into();
+        assert!(
+            apply(&repo, &bad)
+                .unwrap_err()
+                .to_string()
+                .contains("not a git config key")
+        );
+        assert_eq!(
+            all("user.email"),
+            vec!["ada@example.com"],
+            "nothing written"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_keys_are_checked_like_git_does() {
+        for good in [
+            "pull.rebase",
+            "url.git@github.com:acme/.insteadOf",
+            "a-b.c-d",
+            "x.y z.w",
+        ] {
+            assert!(valid_key(good), "{good}");
+        }
+        for bad in [
+            "core",
+            "my_sec.key",
+            "core.ssh command",
+            "core.1x",
+            ".x",
+            "x.",
+            "",
+        ] {
+            assert!(!valid_key(bad), "{bad}");
+        }
     }
 }
