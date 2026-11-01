@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
+use crate::gh;
 use crate::git;
 use crate::profile::{Config, Profile, SigningFormat};
 use crate::rules;
@@ -122,6 +123,15 @@ pub fn profile_findings(profile: &Profile, probe: Option<Probe>) -> Vec<Finding>
             out.push(warn("x509 signing key not checked"));
         }
         (Some(key), _) => out.push(gpg_key(key)),
+    }
+
+    if probe.is_some()
+        && let Some(result) = gh::known(profile)
+    {
+        out.push(match result {
+            Ok(message) => ok(message),
+            Err(why) => fail(why),
+        });
     }
 
     if let (Some(key), Some(probe)) = (&ssh_key, probe)

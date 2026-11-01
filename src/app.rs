@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::cmd;
 use crate::export;
 use crate::form::Form;
 use crate::git::{self, Repo};
@@ -383,9 +384,10 @@ impl App {
                         .to_string(),
                     Some((profile, _)) => match git::apply(&repo, profile) {
                         Ok(()) => format!(
-                            "Applied profile '{}' to {}",
+                            "Applied profile '{}' to {}{}",
                             profile.name,
-                            scan::tildify(&repo.root)
+                            scan::tildify(&repo.root),
+                            cmd::gh_note(profile)
                         ),
                         Err(err) => format!("Failed to apply: {err}"),
                     },
@@ -427,9 +429,10 @@ impl App {
         };
         match git::apply(repo, profile) {
             Ok(()) => {
+                let gh = cmd::gh_note(profile);
                 self.status = Some(match git::still_overridden(&repo.root, profile) {
-                    Some(why) => format!("Applied profile '{}', but {why}", profile.name),
-                    None => format!("Applied profile '{}' to this repo", profile.name),
+                    Some(why) => format!("Applied profile '{}', but {why}{gh}", profile.name),
+                    None => format!("Applied profile '{}' to this repo{gh}", profile.name),
                 });
                 self.refresh();
             }

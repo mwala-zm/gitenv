@@ -5,6 +5,7 @@ mod doctor;
 mod export;
 mod fix;
 mod form;
+mod gh;
 mod git;
 mod hook;
 mod profile;

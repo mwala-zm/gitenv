@@ -4,8 +4,9 @@ use std::process::ExitCode;
 use anyhow::{Context, Result, bail};
 
 use crate::check::{self, Verdict};
+use crate::gh;
 use crate::git::{self, Repo};
-use crate::profile::Config;
+use crate::profile::{Config, Profile};
 use crate::rules;
 
 pub fn load(dir: &Path) -> Result<(Config, Repo)> {
@@ -35,18 +36,7 @@ pub fn apply(name: Option<&str>, dir: &Path) -> ExitCode {
 fn try_apply(name: Option<&str>, dir: &Path) -> Result<(String, bool)> {
     let (config, repo) = load(dir)?;
     let profile = match name {
-        Some(name) => config
-            .profiles
-            .iter()
-            .find(|p| p.name == name)
-            .with_context(|| {
-                let known: Vec<&str> = config.profiles.iter().map(|p| p.name.as_str()).collect();
-                if known.is_empty() {
-                    "no profile is named '{name}'; no profiles saved yet".replace("{name}", name)
-                } else {
-                    format!("no profile is named '{name}'; known: {}", known.join(", "))
-                }
-            })?,
+        Some(name) => named(&config, name)?,
         None => match rules::expected(&config, &repo) {
             Some((profile, _)) => profile,
             None => bail!(
@@ -57,14 +47,40 @@ fn try_apply(name: Option<&str>, dir: &Path) -> Result<(String, bool)> {
     };
     git::apply(&repo, profile)?;
     let applied = format!(
-        "gitenv: applied profile '{}' to {}",
+        "gitenv: applied profile '{}' to {}{}",
         profile.name,
-        repo.root.display()
+        repo.root.display(),
+        gh_note(profile)
     );
     Ok(match git::still_overridden(&repo.root, profile) {
         Some(why) => (format!("{applied}, but {why}"), false),
         None => (applied, true),
     })
+}
+
+/// Switches the GitHub CLI to the profile's account and says how it went, as a
+/// clause to append to the "applied" message; empty for a profile without one.
+pub fn gh_note(profile: &Profile) -> String {
+    match gh::switch(profile) {
+        Ok(None) => String::new(),
+        Ok(Some(account)) => format!("; gh is now {account}"),
+        Err(err) => format!("; gh was not switched: {err:#}"),
+    }
+}
+
+pub fn named<'a>(config: &'a Config, name: &str) -> Result<&'a Profile> {
+    config
+        .profiles
+        .iter()
+        .find(|p| p.name == name)
+        .with_context(|| {
+            let known: Vec<&str> = config.profiles.iter().map(|p| p.name.as_str()).collect();
+            if known.is_empty() {
+                format!("no profile is named '{name}'; no profiles saved yet")
+            } else {
+                format!("no profile is named '{name}'; known: {}", known.join(", "))
+            }
+        })
 }
 
 pub fn status(short: bool, dir: &Path) -> ExitCode {

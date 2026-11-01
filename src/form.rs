@@ -5,7 +5,7 @@ use crate::git::{self, git_bool};
 use crate::profile::{Profile, SigningFormat};
 use crate::rules;
 
-pub const LABELS: [&str; 10] = [
+pub const LABELS: [&str; 11] = [
     "Profile name",
     "Git user.name",
     "Git user.email",
@@ -13,6 +13,7 @@ pub const LABELS: [&str; 10] = [
     "Signing format (gpg/ssh/x509)",
     "Sign commits (yes/no)",
     "SSH key path (optional)",
+    "GitHub CLI account (optional)",
     "Remote rules (comma-separated)",
     "Path rules (comma-separated)",
     "Extra config (k=v, comma-sep.)",
@@ -22,7 +23,7 @@ pub const LABEL_WIDTH: usize = 32;
 
 #[derive(Debug, Clone, Default)]
 pub struct Form {
-    pub values: [String; 10],
+    pub values: [String; 11],
     pub field: usize,
     pub cursor: usize,
     pub editing: Option<usize>,
@@ -54,6 +55,7 @@ impl Form {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default(),
+                profile.gh_account.clone().unwrap_or_default(),
                 profile.remotes.join(", "),
                 profile.paths.join(", "),
                 profile
@@ -180,6 +182,7 @@ impl Form {
             signing_format,
             sign_commits,
             ssh_key,
+            gh_account,
             remotes,
             paths,
             extra,
@@ -238,6 +241,7 @@ impl Form {
             signing_format,
             sign_commits,
             git,
+            gh_account: optional(gh_account),
             remotes,
             paths,
         })
@@ -383,6 +387,7 @@ mod tests {
             ssh_key: Some("/tmp/id".into()),
             signing_format: Some(SigningFormat::Ssh),
             sign_commits: Some(true),
+            gh_account: Some("ada-acme".into()),
             remotes: vec!["github.com/acme/*".into(), "gitlab.com/acme/*".into()],
             paths: vec!["~/work/acme/**".into()],
             git: BTreeMap::from([
@@ -395,12 +400,13 @@ mod tests {
         };
         let form = Form::edit(0, &profile);
         assert_eq!(
-            form.values[9],
+            form.values[10],
             "pull.rebase=true, url.git@github.com:acme/.insteadOf=https://github.com/acme/"
         );
         assert_eq!(form.values[4], "ssh");
         assert_eq!(form.values[5], "yes");
-        assert_eq!(form.values[7], "github.com/acme/*, gitlab.com/acme/*");
+        assert_eq!(form.values[7], "ada-acme");
+        assert_eq!(form.values[8], "github.com/acme/*, gitlab.com/acme/*");
         assert_eq!(form.to_profile().unwrap(), profile);
     }
 
@@ -410,9 +416,9 @@ mod tests {
         form.values[0] = "acme".into();
         form.values[1] = "Ada".into();
         form.values[2] = "ada@acme.example".into();
-        form.values[9] = "pull.rebase".into();
+        form.values[10] = "pull.rebase".into();
         assert!(form.to_profile().unwrap_err().contains("key=value"));
-        form.values[9] = "rebase=true".into();
+        form.values[10] = "rebase=true".into();
         assert!(form.to_profile().unwrap_err().contains("section.name"));
     }
 
@@ -437,7 +443,7 @@ mod tests {
         form.values[0] = "acme".into();
         form.values[1] = "Ada".into();
         form.values[2] = "ada@acme.example".into();
-        form.values[7] = "[oops".into();
+        form.values[8] = "[oops".into();
         assert!(form.to_profile().unwrap_err().contains("Bad pattern"));
     }
 
@@ -446,7 +452,7 @@ mod tests {
         let mut form = typed("p");
         form.values[1] = "Ada".into();
         form.values[2] = "ada@example.com".into();
-        form.values[9] = "alias.lg=log --format=%h,%s, pull.rebase=true".into();
+        form.values[10] = "alias.lg=log --format=%h,%s, pull.rebase=true".into();
         let profile = form.to_profile().unwrap();
         assert_eq!(profile.git["alias.lg"], "log --format=%h,%s");
         assert_eq!(profile.git["pull.rebase"], "true");

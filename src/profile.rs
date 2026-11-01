@@ -91,6 +91,8 @@ pub struct Profile {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub git: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_account: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -393,6 +395,7 @@ mod tests {
                         "url.git@github.com:acme/.insteadOf".to_string(),
                         "https://github.com/acme/".to_string(),
                     )]),
+                    gh_account: Some("ada-acme".into()),
                     remotes: vec!["github.com/acme/*".into()],
                     paths: vec!["~/work/acme/**".into()],
                 },
@@ -401,6 +404,7 @@ mod tests {
         let text = toml::to_string_pretty(&config).unwrap();
         assert!(text.contains("signing_format = \"ssh\""), "{text}");
         assert!(text.contains("sign_commits = true"), "{text}");
+        assert!(text.contains("gh_account = \"ada-acme\""), "{text}");
         assert!(text.contains("[profiles.git]"), "{text}");
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(config, back);
