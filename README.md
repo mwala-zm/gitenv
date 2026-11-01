@@ -148,6 +148,7 @@ user_name = "Ada Lovelace"
 email = "ada@acme.example"
 signing_key = "ABCD1234"
 ssh_key = "~/.ssh/id_acme"
+gh_account = "ada-acme"
 remotes = ["github.com/acme/*"]
 paths = ["~/work/acme/**"]
 
@@ -174,6 +175,14 @@ Everything after `email` is optional:
 - `ssh_key` makes pushes and fetches from the repository use
   `ssh -i <key> -o IdentitiesOnly=yes`, so the right key is offered even
   with several loaded in your agent. `~` is expanded and spaces are fine.
+- `gh_account` names the [GitHub CLI](https://cli.github.com) login that
+  goes with the profile, as `login` or `login@host` for GitHub Enterprise.
+  Applying the profile from the command line, the TUI or `gitenv clone`
+  runs `gh auth switch` to match, so pull requests open as the same person
+  the commits name. The login must already be known to gh (`gh auth login`
+  once per account); `gitenv doctor` checks that it is. `gitenv scan --fix`
+  leaves gh alone, since the account is global and the last repository
+  would win.
 - `remotes` and `paths` are [rules](#rules).
 - `[profiles.git]` holds any other git setting the identity needs. Dotted
   keys can be written bare (`pull.rebase = true`) or quoted.
@@ -322,7 +331,9 @@ gitenv status            # what git would use here, and whether it is right
 gitenv status --short    # one token for a shell prompt, e.g. `acme`
 gitenv apply acme        # write a profile into this repo without the UI
 gitenv apply             # apply whichever profile's rules claim this repo
+gitenv clone URL         # clone with the profile the URL's rules name
 gitenv scan ~/work       # every repository under a folder, and its verdict
+gitenv report ~/work     # your commits this month, by profile and repo
 gitenv export --install  # let git apply your rules itself
 gitenv hook install      # check every commit and push
 gitenv doctor            # check every profile's keys exist and log in
@@ -340,11 +351,28 @@ what git would use and which profile the repository should be on. It exits
 apply` with no name applies the profile whose rules claim the repository.
 If something stronger than the repository's config, such as worktree config
 or `GIT_AUTHOR_*`, still makes git commit as someone else, it says so and
-exits 1. Both take `--path DIR`, which makes a clone wrapper a one-liner:
+exits 1. Both take `--path DIR`.
+
+### Cloning onto the right profile
+
+Rules and hooks protect a repository once it exists. The clone itself is
+where git picks an SSH key before gitenv has anything to look at, and a
+client repository cloned with your personal key either fails or, worse,
+goes through the wrong account. `gitenv clone` closes that gap:
 
 ```sh
-git clone git@github.com:acme/api.git && gitenv apply --path api
+gitenv clone git@github.com:acme/api.git            # rules pick the profile
+gitenv clone git@github.com:acme/api.git api2 -p acme
+gitenv clone git@github.com:acme/api.git -- --depth 1
 ```
+
+It matches the URL against every profile's remote rules, runs `git clone`
+with that profile's `ssh_key` and `[profiles.git]` settings so the very
+first fetch offers the right key, then writes the profile into the new
+clone before its first commit and switches `gh` to its account. `-p`
+names a profile instead of the rules; anything after `--` goes to `git
+clone`. When no rule claims the URL and `-p` is not given, the clone still
+happens with git's own identity, and gitenv says so and exits 1.
 
 `gitenv status` prints the repository, remote, identity, where the identity
 comes from, recent commit authors, the matching profile, the rule that
@@ -405,6 +433,37 @@ would reject. For each host a profile's remote
 rules name, it runs `ssh -T` with only that profile's key and shows which
 account the host greets, so a key registered to the wrong account stands
 out. `--offline` skips that. It exits 1 if any check failed.
+
+### Reporting what you committed for whom
+
+Working for several clients means telling them apart at invoice time.
+`gitenv report DIR` walks every repository under a folder as `scan` does
+and lists the commits you made there, over all branches, grouped by the
+profile each repository belongs to:
+
+```
+acme <ada@acme.example>                      12 commits
+  ~/work/acme/api                            9
+    2026-10-28  a1b2c3d   Add login endpoint
+    2026-10-27  b2c3d4e   Fix flaky test  (as ada@example.com)
+  ~/work/acme/web                            3
+    ...
+personal <ada@example.com>                   2 commits
+  ~/play/thing                               2
+    ...
+
+14 commits in 3 repositories since 30 days ago; 1 made as another identity
+```
+
+Your commits are those whose author email is any profile's; teammates'
+commits are left out. A repository belongs to the profile a rule claims it
+for, else the one its identity matches. A commit made with a different
+email than its repository's profile is marked `(as ...)`, so a slip shows
+up here even once it is pushed. `--since` and `--until` take anything
+`git log` does, such as `"2 weeks ago"` or `2026-10-01`; the default is
+the last 30 days. `--csv` prints one row per commit with the date,
+profile, repository, commit, author email and subject, ready for a
+timesheet.
 
 ### Fixing commits made as someone else
 
