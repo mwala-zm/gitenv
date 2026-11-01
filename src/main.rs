@@ -1,5 +1,6 @@
 mod app;
 mod check;
+mod clone;
 mod cmd;
 mod doctor;
 mod export;
@@ -72,6 +73,27 @@ enum Command {
         /// Directory inside the repository
         #[arg(long, short, default_value = ".")]
         path: PathBuf,
+    },
+    /// Clone a repository with the profile its remote rules name
+    ///
+    /// Matches URL against every profile's remote rules, runs `git clone`
+    /// with that profile's ssh key and [profiles.git] settings, so the
+    /// first fetch already uses the right key, then writes the profile
+    /// into the new clone and switches the GitHub CLI to its account.
+    /// Arguments for git clone go after `--`. When no rule claims the URL
+    /// and --profile is not given, the clone still happens with git's own
+    /// identity, and the command says so and exits 1.
+    Clone {
+        /// Repository to clone, in any form git accepts
+        url: String,
+        /// Directory to clone into (default: what git would pick)
+        dir: Option<PathBuf>,
+        /// Profile to use instead of the one the rules pick
+        #[arg(long, short)]
+        profile: Option<String>,
+        /// Extra arguments for git clone, after `--`
+        #[arg(last = true)]
+        git_args: Vec<String>,
     },
     /// Show what git would use here and whether it is the right profile
     ///
@@ -193,6 +215,17 @@ fn main() -> Result<ExitCode> {
         Some(Command::Check { path }) => Ok(in_dir(path, check::run)),
         Some(Command::Apply { profile, path }) => Ok(in_dir(Some(path), |dir| {
             cmd::apply(profile.as_deref(), dir)
+        })),
+        Some(Command::Clone {
+            url,
+            dir,
+            profile,
+            git_args,
+        }) => Ok(clone::run(&clone::Options {
+            url,
+            dir,
+            profile,
+            git_args,
         })),
         Some(Command::Status { short, path }) => Ok(in_dir(path, |dir| cmd::status(short, dir))),
         Some(Command::Scan { dir, problems, fix }) => Ok(in_dir(dir, |dir| {

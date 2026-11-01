@@ -182,17 +182,32 @@ pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Rea
         .map(normalize_remote)
         .collect();
     let root = repo.root.display().to_string();
+    claim(config, &urls, Some(&root))
+}
+
+/// The profile whose remote rule claims `url`, for a repository that does not
+/// exist yet, such as the one `gitenv clone` is about to make. Path rules are
+/// not consulted, since where the clone lands is git's business.
+pub fn for_remote<'a>(config: &'a Config, url: &str) -> Option<(&'a Profile, Reason)> {
+    claim(config, &[normalize_remote(url)], None)
+}
+
+fn claim<'a>(
+    config: &'a Config,
+    urls: &[String],
+    root: Option<&str>,
+) -> Option<(&'a Profile, Reason)> {
     all(config)
         .into_iter()
         .filter(|rule| match rule.reason {
             Reason::Remote(_) => urls.iter().any(|url| matches(&rule.pattern, url)),
-            Reason::Path(_) => {
-                path_matches(&rule.pattern, &root)
+            Reason::Path(_) => root.is_some_and(|root| {
+                path_matches(&rule.pattern, root)
                     || rule
                         .resolved
                         .as_ref()
-                        .is_some_and(|p| path_matches(p, &root))
-            }
+                        .is_some_and(|p| path_matches(p, root))
+            }),
         })
         .min_by_key(|rule| Reverse(rule.rank))
         .map(|rule| (rule.profile, rule.reason))
