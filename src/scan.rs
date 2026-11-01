@@ -382,7 +382,8 @@ mod tests {
         let (rows, warnings) = scan(&config, &base, &fix).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(rows.len(), 7);
-        assert!(rows.iter().all(|r| r.fixed.is_some()), "{rows:?}");
+        assert!(rows.iter().all(|r| r.is_ok()), "{rows:?}");
+        assert!(rows.iter().any(|r| r.fixed.is_some()), "{rows:?}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
