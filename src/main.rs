@@ -10,6 +10,7 @@ mod gh;
 mod git;
 mod hook;
 mod profile;
+mod report;
 mod rules;
 mod scan;
 mod ui;
@@ -125,6 +126,28 @@ enum Command {
         #[arg(long)]
         fix: bool,
     },
+    /// List the commits you made, grouped by the profile each repo belongs to
+    ///
+    /// Walks every repository under DIR as `scan` does, and lists your
+    /// commits there over all branches: those whose author email is any
+    /// profile's. Repositories are grouped by the profile a rule claims
+    /// them for, else the one their identity matches. A commit made with
+    /// a different email than its repository's profile is marked, so a
+    /// slip stands out. --since and --until take anything git does, such
+    /// as "2 weeks ago" or 2026-10-01. --csv prints one row per commit.
+    Report {
+        /// Directory to search (default: the current directory)
+        dir: Option<PathBuf>,
+        /// Start of the period
+        #[arg(long, default_value = "30 days ago")]
+        since: String,
+        /// End of the period (default: now)
+        #[arg(long)]
+        until: Option<String>,
+        /// One row per commit: date, profile, repo, commit, author email, subject
+        #[arg(long)]
+        csv: bool,
+    },
     /// Check that each profile would work: keys exist and log in
     ///
     /// Looks for missing ssh and signing key files, a GPG key missing from
@@ -236,6 +259,14 @@ fn main() -> Result<ExitCode> {
                     fix,
                 },
             )
+        })),
+        Some(Command::Report {
+            dir,
+            since,
+            until,
+            csv,
+        }) => Ok(in_dir(dir, |dir| {
+            report::run(dir, &report::Options { since, until, csv })
         })),
         Some(Command::Doctor { offline }) => Ok(doctor::run(offline)),
         Some(Command::FixAuthors { yes, path }) => Ok(in_dir(Some(path), |dir| fix::run(dir, yes))),
