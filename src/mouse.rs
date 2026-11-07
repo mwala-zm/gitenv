@@ -96,38 +96,20 @@ fn click(app: &mut App, x: u16, y: u16, screen: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::Filter;
-    use crate::profile::{Config, Profile};
-    use crate::theme::Theme;
-    use crate::watch::Watch;
+    use crate::profile::Profile;
     use ratatui::crossterm::event::KeyModifiers;
 
     fn app(names: &[&str]) -> App {
-        App {
-            config: Config {
-                profiles: names
-                    .iter()
-                    .map(|n| Profile {
-                        name: n.to_string(),
-                        user_name: "Ada".into(),
-                        email: "ada@example.com".into(),
-                        ..Default::default()
-                    })
-                    .collect(),
-            },
-            config_path: "/nonexistent/config.toml".into(),
-            repo: None,
-            selected: 0,
-            status: None,
-            mode: Mode::Normal,
-            should_quit: false,
-            scan_root: "/".into(),
-            config_text: None,
-            pending: None,
-            profile_filter: Filter::default(),
-            watch: Watch::default(),
-            theme: Theme::default(),
-        }
+        let profiles = names
+            .iter()
+            .map(|n| Profile {
+                name: n.to_string(),
+                user_name: "Ada".into(),
+                email: "ada@example.com".into(),
+                ..Default::default()
+            })
+            .collect();
+        App::for_test(profiles, "/nonexistent/config.toml".into())
     }
 
     fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

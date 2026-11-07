@@ -92,7 +92,12 @@ Pointed at a folder that is not itself a repository, such as `gitenv ~/work`,
 it opens on the list of repositories in it.
 
 The left pane lists your profiles: `●` marks the one git is using here and
-`◆` the one a rule says this repository belongs to. The right pane shows the
+`◆` the one a rule says this repository belongs to. A `✗` or `!` after a
+name means [`gitenv doctor`](#command-line) found a problem with it, such
+as a missing ssh key or a signing key gpg does not have; these badges come
+from local checks only, so the list never waits on the network. `D` shows
+the details, then logs in over ssh and asks gh in the background and adds
+what they say. The right pane shows the
 repository, the identity git will use, where that identity comes from,
 whether it is right, and whether any of the last 20 commits were made as
 someone else.
@@ -108,6 +113,7 @@ someone else.
 | `s` | list every repository next to this one |
 | `f` | re-author unpushed commits made as someone else |
 | `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
+| `D` | check the selected profile's keys and logins |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 

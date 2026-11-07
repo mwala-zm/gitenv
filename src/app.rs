@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cmd;
+use crate::doctor::{self, Finding};
 use crate::export;
 use crate::filter::{self, Filter};
 use crate::fix;
@@ -23,7 +25,18 @@ pub enum Mode {
     ConfirmDelete,
     Scan(Box<ScanView>),
     FixAuthors(Box<FixView>),
+    Doctor(Box<DoctorView>),
 }
+
+#[derive(Debug, Clone)]
+pub struct DoctorView {
+    pub name: String,
+    pub email: String,
+    pub findings: Vec<Finding>,
+    pub checking: bool,
+}
+
+pub type SshProbe = fn(&Path, &str) -> Result<String, String>;
 
 /// Work the main loop runs between frames, so it can hand the terminal
 /// back first when the work may ask for a passphrase.
@@ -139,6 +152,9 @@ pub struct App {
     pub profile_filter: Filter,
     pub watch: Watch,
     pub theme: Theme,
+    pub health: Vec<Vec<Finding>>,
+    pub doctor_rx: Option<Receiver<Vec<Finding>>>,
+    pub ssh_probe: SshProbe,
 }
 
 impl App {
@@ -193,7 +209,11 @@ impl App {
             profile_filter: Filter::default(),
             watch: Watch::default(),
             theme: Theme::from_env(),
+            health: Vec::new(),
+            doctor_rx: None,
+            ssh_probe: doctor::ssh_probe,
         };
+        app.check_health();
         app.select_active();
         if started_outside {
             let status = app.status.take();
@@ -201,6 +221,44 @@ impl App {
             app.status = status;
         }
         Ok(app)
+    }
+
+    /// An app on `profiles` with nothing read from disk, for tests.
+    #[cfg(test)]
+    pub fn for_test(profiles: Vec<Profile>, config_path: PathBuf) -> Self {
+        Self {
+            config: Config { profiles },
+            config_path,
+            repo: None,
+            selected: 0,
+            status: None,
+            mode: Mode::Normal,
+            should_quit: false,
+            scan_root: std::env::temp_dir(),
+            config_text: None,
+            pending: None,
+            profile_filter: Filter::default(),
+            watch: Watch::default(),
+            theme: Theme::default(),
+            health: Vec::new(),
+            doctor_rx: None,
+            ssh_probe: |_, _| Err("no network in tests".into()),
+        }
+    }
+
+    /// Runs doctor's local checks on every profile, for the badges in the
+    /// list: key files and the gpg keyring, never the network.
+    pub fn check_health(&mut self) {
+        self.health = self
+            .config
+            .profiles
+            .iter()
+            .map(|p| doctor::findings_for(p, None))
+            .collect();
+    }
+
+    pub fn badge(&self, index: usize) -> Option<doctor::Level> {
+        self.health.get(index).and_then(|f| doctor::badge(f))
     }
 
     pub fn active_profile(&self) -> Option<&Profile> {
@@ -266,6 +324,7 @@ impl App {
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
             Mode::Scan(_) => self.handle_scan_key(key),
             Mode::FixAuthors(_) => self.handle_fix_key(key),
+            Mode::Doctor(_) => self.handle_doctor_key(key),
         }
     }
 
@@ -290,6 +349,7 @@ impl App {
             }
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
+            (KeyCode::Char('D'), _) => self.open_doctor(),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
             (KeyCode::Char('e'), _) => {
@@ -383,6 +443,7 @@ impl App {
             .map_err(|e| format!("Could not save config: {}", e.root_cause()))?;
         self.config = config;
         self.config_text = std::fs::read_to_string(&self.config_path).ok();
+        self.check_health();
         Ok(())
     }
 
@@ -391,6 +452,7 @@ impl App {
             Ok(config) => {
                 self.config = config;
                 self.config_text = std::fs::read_to_string(&self.config_path).ok();
+                self.check_health();
                 self.selected = self
                     .selected
                     .min(self.config.profiles.len().saturating_sub(1));
@@ -750,6 +812,7 @@ impl App {
     /// re-reads it after noting its files, so a change made while it was
     /// first read is not taken as the starting point.
     pub fn tick(&mut self) {
+        self.take_doctor_result();
         if !matches!(self.mode, Mode::Normal | Mode::Scan(_) | Mode::Help) {
             return;
         }
@@ -826,6 +889,64 @@ impl App {
         }
     }
 
+    /// Shows everything doctor says about the highlighted profile: the local
+    /// checks at once, and the logins over ssh and gh as they come back from
+    /// a background thread, so the screen never waits on the network.
+    fn open_doctor(&mut self) {
+        let Some(profile) = self.selected_profile().cloned() else {
+            self.status = Some("No profile to check".into());
+            return;
+        };
+        let findings = doctor::findings_for(&profile, None);
+        let checking = doctor::needs_network(&profile);
+        self.doctor_rx = None;
+        if checking {
+            let (tx, rx) = mpsc::channel();
+            let probe = self.ssh_probe;
+            let p = profile.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(doctor::findings_for(&p, Some(&probe)));
+            });
+            self.doctor_rx = Some(rx);
+        }
+        self.mode = Mode::Doctor(Box::new(DoctorView {
+            name: profile.name,
+            email: profile.email,
+            findings,
+            checking,
+        }));
+    }
+
+    fn handle_doctor_key(&mut self, key: KeyEvent) {
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Char('r'), _) => self.open_doctor(),
+            _ => {
+                self.doctor_rx = None;
+                self.mode = Mode::Normal;
+            }
+        }
+    }
+
+    /// Takes the full findings from the background check once they arrive.
+    fn take_doctor_result(&mut self) {
+        let Some(rx) = &self.doctor_rx else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(findings) => Some(findings),
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.doctor_rx = None;
+        if let Mode::Doctor(view) = &mut self.mode {
+            view.checking = false;
+            if let Some(findings) = result {
+                view.findings = findings;
+            }
+        }
+    }
+
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -886,22 +1007,10 @@ mod tests {
     use super::*;
 
     fn app_with(tag: &str, profiles: Vec<Profile>) -> App {
-        App {
-            config: Config { profiles },
-            config_path: std::env::temp_dir()
-                .join(format!("gitenv-app-test-{}-{tag}.toml", std::process::id())),
-            repo: None,
-            selected: 0,
-            status: None,
-            mode: Mode::Normal,
-            should_quit: false,
-            scan_root: std::env::temp_dir(),
-            config_text: None,
-            pending: None,
-            profile_filter: Filter::default(),
-            watch: Watch::default(),
-            theme: Theme::default(),
-        }
+        App::for_test(
+            profiles,
+            std::env::temp_dir().join(format!("gitenv-app-test-{}-{tag}.toml", std::process::id())),
+        )
     }
 
     fn profile(name: &str) -> Profile {
@@ -1458,5 +1567,54 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('r')));
         assert_eq!(view(&app).to_fix(), [2], "marks survive a rescan");
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn health_badges_follow_saved_profiles() {
+        let mut app = app_with("health", vec![profile("a")]);
+        app.check_health();
+        assert_eq!(app.badge(0), None);
+        let mut broken = profile("a");
+        broken.ssh_key = Some("/nonexistent/id_a".into());
+        app.save_profile(Some(0), broken).unwrap();
+        assert_eq!(app.badge(0), Some(doctor::Level::Fail));
+        std::fs::remove_file(&app.config_path).ok();
+    }
+
+    #[test]
+    fn doctor_view_shows_local_checks_then_the_logins() {
+        let mut acme = profile("acme");
+        acme.ssh_key = Some(std::env::current_exe().unwrap());
+        acme.remotes = vec!["github.com/acme/*".into()];
+        let mut app = app_with("doctor", vec![acme]);
+        app.ssh_probe = |_, host| Ok(format!("Hi ada-acme! ({host})"));
+        app.handle_key(KeyEvent::from(KeyCode::Char('D')));
+        let Mode::Doctor(view) = &app.mode else {
+            panic!("D should open the doctor view: {:?}", app.status);
+        };
+        assert!(view.checking);
+        assert_eq!(view.findings.len(), 1, "{:?}", view.findings);
+        assert!(app.doctor_rx.is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while matches!(&app.mode, Mode::Doctor(v) if v.checking) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the check never came back"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.tick();
+        }
+        let Mode::Doctor(view) = &app.mode else {
+            panic!()
+        };
+        assert!(
+            view.findings
+                .iter()
+                .any(|f| f.message == "github.com: Hi ada-acme! (github.com)"),
+            "{:?}",
+            view.findings
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
     }
 }

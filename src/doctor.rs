@@ -6,7 +6,7 @@ use crate::git;
 use crate::profile::{Config, Profile, SigningFormat};
 use crate::rules;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Ok,
     Warn,
@@ -64,26 +64,67 @@ pub fn config_findings(config: &Config) -> Vec<Finding> {
         }
     }
     for p in profiles {
-        let checks = [rules::validate(&p.remotes), rules::validate_paths(&p.paths)];
-        for e in checks.into_iter().filter_map(Result::err) {
-            out.push(fail(format!("'{}': {e}", p.name)));
-        }
-        if git::as_git_writes(&p.user_name) != p.user_name {
-            out.push(warn(format!(
-                "'{}': git writes the name as '{}', so commits never match '{}'",
-                p.name,
-                git::as_git_writes(&p.user_name),
-                p.user_name
-            )));
-        }
-        for key in p.git.keys().filter(|k| !git::valid_key(k)) {
-            out.push(fail(format!(
-                "'{}': '{key}' under [profiles.git] is not a git config key",
-                p.name
-            )));
-        }
+        out.extend(rule_findings(p));
     }
     out
+}
+
+/// One profile's own config problems: rule patterns that do not parse, a
+/// name git would write differently, and `[profiles.git]` keys that are not
+/// git config keys.
+pub fn rule_findings(p: &Profile) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let checks = [rules::validate(&p.remotes), rules::validate_paths(&p.paths)];
+    for e in checks.into_iter().filter_map(Result::err) {
+        out.push(fail(format!("'{}': {e}", p.name)));
+    }
+    if git::as_git_writes(&p.user_name) != p.user_name {
+        out.push(warn(format!(
+            "'{}': git writes the name as '{}', so commits never match '{}'",
+            p.name,
+            git::as_git_writes(&p.user_name),
+            p.user_name
+        )));
+    }
+    for key in p.git.keys().filter(|k| !git::valid_key(k)) {
+        out.push(fail(format!(
+            "'{}': '{key}' under [profiles.git] is not a git config key",
+            p.name
+        )));
+    }
+    out
+}
+
+const NOTHING: &str = "nothing to check beyond name and email";
+
+/// Everything doctor says about one profile: its own config problems, then
+/// its keys, and with a `probe` its logins too. The note that there was
+/// nothing to check stays only when there was nothing else to say.
+pub fn findings_for(profile: &Profile, probe: Option<Probe>) -> Vec<Finding> {
+    let mut out = rule_findings(profile);
+    let keys = profile_findings(profile, probe);
+    if out.is_empty() || keys.iter().any(|f| f.message != NOTHING) {
+        out.extend(keys);
+    }
+    out
+}
+
+/// Whether checking `profile` fully means going over the network: logging in
+/// to a host its remote rules name with its ssh key, or asking gh about its
+/// account.
+pub fn needs_network(profile: &Profile) -> bool {
+    let key = profile.ssh_key.as_deref().map(git::expand_tilde);
+    gh::account(profile).is_some()
+        || (key.is_some_and(|k| k.is_file()) && !hosts(profile).is_empty())
+}
+
+/// The worst level among `findings`, or none when there was nothing to
+/// check, so a plain profile carries no badge.
+pub fn badge(findings: &[Finding]) -> Option<Level> {
+    if findings.iter().all(|f| f.message == NOTHING) {
+        return None;
+    }
+    findings.iter().map(|f| f.level).max()
 }
 
 pub type Probe<'a> = &'a dyn Fn(&Path, &str) -> Result<String, String>;
@@ -146,7 +187,7 @@ pub fn profile_findings(profile: &Profile, probe: Option<Probe>) -> Vec<Finding>
     }
 
     if out.is_empty() {
-        out.push(ok("nothing to check beyond name and email"));
+        out.push(ok(NOTHING));
     }
     out
 }
@@ -391,5 +432,39 @@ mod tests {
             f[0].message.contains("git writes the name as 'Ada'"),
             "{f:?}"
         );
+    }
+
+    #[test]
+    fn findings_for_a_profile_combine_its_rules_and_keys() {
+        let plain = findings_for(&profile("me"), None);
+        assert_eq!(plain, vec![ok(NOTHING)]);
+        assert_eq!(badge(&plain), None);
+
+        let mut bad = profile("bad");
+        bad.remotes = vec!["github.com/[acme".into()];
+        let f = findings_for(&bad, None);
+        assert_eq!(levels(&f), vec![Level::Fail], "{f:?}");
+        assert_eq!(badge(&f), Some(Level::Fail));
+
+        let mut keyed = profile("keyed");
+        keyed.ssh_key = Some("/nonexistent/id_keyed".into());
+        keyed.user_name = "Ada ".into();
+        let f = findings_for(&keyed, None);
+        assert_eq!(levels(&f), vec![Level::Warn, Level::Fail], "{f:?}");
+        assert_eq!(badge(&f), Some(Level::Fail));
+    }
+
+    #[test]
+    fn only_logins_need_the_network() {
+        let mut p = profile("acme");
+        assert!(!needs_network(&p));
+        p.remotes = vec!["github.com/acme/*".into()];
+        p.ssh_key = Some("/nonexistent/id_acme".into());
+        assert!(!needs_network(&p), "a missing key cannot log in");
+        p.ssh_key = Some(std::env::current_exe().unwrap());
+        assert!(needs_network(&p));
+        p.ssh_key = None;
+        p.gh_account = Some("ada-acme".into());
+        assert!(needs_network(&p));
     }
 }

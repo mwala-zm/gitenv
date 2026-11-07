@@ -5,7 +5,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, FixView, Mode, ScanView};
+use crate::app::{App, DoctorView, FixView, Mode, ScanView};
+use crate::doctor::Level;
 use crate::filter::Filter;
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
@@ -101,6 +102,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::Help => render_help(frame),
         Mode::Edit(form) => render_form(frame, form),
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
+        Mode::Doctor(view) => render_doctor(frame, view),
         Mode::Scan(_) | Mode::FixAuthors(_) => {}
     }
 }
@@ -393,6 +395,44 @@ fn short_path(path: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
+/// Doctor's findings for one profile, each wrapped under its level, with a
+/// note while the logins are still being checked.
+fn render_doctor(frame: &mut Frame, view: &DoctorView) {
+    let width: u16 = 72;
+    let text_width = width as usize - 2 - 6;
+    let mut lines = Vec::new();
+    for f in &view.findings {
+        let word = match f.level {
+            Level::Ok => "ok  ".green(),
+            Level::Warn => "warn".yellow(),
+            Level::Fail => "fail".red(),
+        };
+        for (i, part) in wrap(&f.message, text_width).into_iter().enumerate() {
+            let lead = if i == 0 { word.clone() } else { "    ".into() };
+            lines.push(Line::from(vec![lead, "  ".into(), part.into()]));
+        }
+    }
+    if view.checking {
+        lines.push(Line::from("…     checking logins over ssh and gh".dim()));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![
+            " r ".bold(),
+            "check again   ".dim(),
+            " any other key ".bold(),
+            "close".dim(),
+        ]),
+    ]);
+    let area = centered(frame.area(), width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::bordered().title(format!(" Doctor: {} <{}> ", view.name, view.email))),
+        area,
+    );
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -411,6 +451,7 @@ fn render_help(frame: &mut Frame) {
         ("r", "re-read the repo and the profiles file"),
         ("f", "re-author unpushed commits made as someone else"),
         ("/", "filter the list; Enter keeps it, Esc clears it"),
+        ("D", "check the selected profile's keys and logins"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -612,16 +653,23 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let visible = app.visible_profiles();
     let mut items: Vec<ListItem> = visible
         .iter()
-        .map(|&i| &app.config.profiles[i])
-        .map(|p| {
+        .map(|&i| (&app.config.profiles[i], app.badge(i)))
+        .map(|(p, badge)| {
             let (marker, colour) = match (active == Some(p), expected == Some(p)) {
                 (true, _) => ("● ", Color::Green),
                 (false, true) => ("◆ ", Color::Yellow),
                 (false, false) => ("  ", Color::Reset),
             };
+            let badge = match badge {
+                Some(Level::Fail) => " ✗".red(),
+                Some(Level::Warn) => " !".yellow(),
+                Some(Level::Ok) => " ✓".green().dim(),
+                None => "".into(),
+            };
             let line = Line::from(vec![
                 Span::styled(marker, Style::new().fg(colour)),
                 Span::raw(&p.name),
+                badge,
                 Span::raw("  "),
                 Span::styled(&p.email, Style::new().dim()),
             ]);
@@ -877,7 +925,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
 mod tests {
     use super::*;
     use crate::git::{Author, Identity, Repo};
-    use crate::profile::{Config, Profile};
+    use crate::profile::Profile;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -926,21 +974,11 @@ mod tests {
     }
 
     fn app(profiles: Vec<Profile>, repo: Option<Repo>) -> App {
-        App {
-            config: Config { profiles },
-            config_path: "/home/ada/.config/gitenv/config.toml".into(),
-            repo,
-            selected: 1,
-            status: None,
-            mode: Mode::Normal,
-            should_quit: false,
-            scan_root: "/home/ada/work".into(),
-            config_text: None,
-            pending: None,
-            profile_filter: Default::default(),
-            watch: Default::default(),
-            theme: Default::default(),
-        }
+        let mut app = App::for_test(profiles, "/home/ada/.config/gitenv/config.toml".into());
+        app.repo = repo;
+        app.selected = 1;
+        app.scan_root = "/home/ada/work".into();
+        app
     }
 
     fn draw(app: &App) -> String {
@@ -1101,6 +1139,31 @@ mod tests {
         view.confirming = true;
         app.mode = Mode::Scan(Box::new(view));
         insta::assert_snapshot!("scan_fix_popup", draw(&app));
+    }
+
+    #[test]
+    fn health_badges_and_the_doctor_view() {
+        use crate::app::DoctorView;
+        use crate::doctor::Finding;
+        let mut app = app(profiles(), Some(repo()));
+        let finding = |level, message: &str| Finding {
+            level,
+            message: message.into(),
+        };
+        app.health = vec![
+            vec![finding(Level::Ok, "nothing to check beyond name and email")],
+            vec![
+                finding(Level::Fail, "gpg has no secret key ABCD1234"),
+                finding(Level::Ok, "ssh key /home/ada/.ssh/id_acme exists"),
+            ],
+        ];
+        app.mode = Mode::Doctor(Box::new(DoctorView {
+            name: "acme".into(),
+            email: "ada@acme.example".into(),
+            findings: app.health[1].clone(),
+            checking: true,
+        }));
+        insta::assert_snapshot!(draw(&app));
     }
 
     #[test]
