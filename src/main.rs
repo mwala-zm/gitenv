@@ -357,8 +357,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, mouse: bool) -> Result<()>
             if app.pending_needs_terminal() {
                 capture_mouse(mouse, false);
                 ratatui::restore();
-                println!("gitenv: rewriting commits; sign them if asked");
-                app.run_pending();
+                println!("{}", app.pending_note());
+                if app.run_pending() {
+                    println!("\ngitenv: press Enter to go back");
+                    let _ = io::stdin().read_line(&mut String::new());
+                }
                 *terminal = ratatui::init();
                 capture_mouse(mouse, true);
             } else {

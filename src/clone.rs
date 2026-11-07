@@ -32,7 +32,7 @@ pub fn run(opts: &Options) -> ExitCode {
     }
 }
 
-enum Outcome {
+pub enum Outcome {
     Applied(String),
     Overridden(String),
     Unclaimed(String),
@@ -49,17 +49,25 @@ fn try_run(opts: &Options) -> Result<Outcome> {
         .clone()
         .or_else(|| target_dir(&opts.url))
         .context("cannot tell where git would put this clone; name the directory")?;
+    clone(&opts.url, &target, profile, &opts.git_args)
+}
 
+/// Clones `url` into `target` with `profile`'s ssh key and git settings, then
+/// writes the profile into the clone and switches gh to its account. Without
+/// a profile the clone keeps git's own identity, which the outcome says.
+pub fn clone(
+    url: &str,
+    target: &std::path::Path,
+    profile: Option<&Profile>,
+    git_args: &[String],
+) -> Result<Outcome> {
     let mut git = Command::new("git");
     if let Some(profile) = profile {
         for (key, value) in clone_config(profile) {
             git.arg("-c").arg(format!("{key}={value}"));
         }
     }
-    git.arg("clone")
-        .args(&opts.git_args)
-        .arg(&opts.url)
-        .arg(&target);
+    git.arg("clone").args(git_args).arg(url).arg(target);
     let status = git
         .status()
         .context("running git; is it installed and on PATH?")?;
@@ -72,11 +80,11 @@ fn try_run(opts: &Options) -> Result<Outcome> {
             "gitenv: cloned {} with git's own identity; no profile rule claims {}.\n\
              Pick one: gitenv apply <PROFILE> --path {}",
             target.display(),
-            rules::hide_password(&opts.url),
+            rules::hide_password(url),
             target.display()
         )));
     };
-    let repo = git::discover(&target)?.with_context(|| {
+    let repo = git::discover(target)?.with_context(|| {
         format!(
             "cloned {}, but it is not a working repository gitenv can write to (a bare clone?)",
             target.display()

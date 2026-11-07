@@ -120,6 +120,7 @@ someone else.
 | `d` | delete the selected profile (asks first) |
 | `r` | re-read the repo and the profiles file |
 | `w` | why this repo belongs to the profile it does |
+| `c` | clone a repository onto the right profile |
 | `s` | list every repository next to this one |
 | `f` | re-author unpushed commits made as someone else |
 | `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
@@ -135,6 +136,14 @@ rule beats a path rule, a longer text before the first wildcard beats a
 shorter one, and between equals the earlier profile wins), with the
 remote and path the rules were matched against. When none matches, it
 suggests a rule that would.
+
+`c` clones without leaving the TUI, as [`gitenv clone`](#cloning-onto-the-right-profile)
+does. Paste the URL, and the dialog shows where the clone goes (next to
+this repository) and which profile its remote rules give it; `←` `→` pick
+another profile or none. While git clones, the screen is handed back so it
+can ask for a password or to trust a host; if the clone fails, git's
+message stays until you press `Enter`. The new clone then opens in the
+main view.
 
 `N` starts a new profile from what git uses here: the name, email and
 signing settings, the ssh key an `ssh -i` core.sshCommand offers, and a

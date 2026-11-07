@@ -5,7 +5,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, DoctorView, FixView, Mode, ScanView, Setup, SetupAction};
+use crate::app::{
+    App, CloneChoice, CloneView, DoctorView, FixView, Mode, ScanView, Setup, SetupAction,
+};
 use crate::doctor::Level;
 use crate::export::Includes;
 use crate::filter::Filter;
@@ -107,6 +109,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::Doctor(view) => render_doctor(frame, view),
         Mode::ConfirmSetup(action) => render_confirm_setup(frame, *action, app),
         Mode::Why => render_why(frame, app),
+        Mode::Clone(view) => render_clone(frame, view, app),
         Mode::Scan(_) | Mode::FixAuthors(_) => {}
     }
 }
@@ -399,6 +402,79 @@ fn short_path(path: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
+/// The clone dialog: the URL, where it goes, and the profile it will get,
+/// which follows the URL's remote rules until another is picked.
+fn render_clone(frame: &mut Frame, view: &CloneView, app: &App) {
+    let width: u16 = 80.min(frame.area().width);
+    let label_width = 12;
+    let value_width = (width as usize).saturating_sub(2 + label_width + 1);
+    let style = |row: usize| {
+        if view.row == row {
+            Style::new().bold().fg(Color::Cyan)
+        } else {
+            Style::new()
+        }
+    };
+    let field = |row: usize, label: &str, value: &str| {
+        Line::from(vec![
+            Span::styled(format!("{label:<label_width$}"), style(row)),
+            Span::raw(
+                visible(
+                    value,
+                    (view.row == row).then_some(value.chars().count()),
+                    value_width,
+                )
+                .0,
+            ),
+        ])
+    };
+    let profile = match (view.choice, view.profile(&app.config)) {
+        (CloneChoice::Nobody, _) => "none: git's own identity".to_string(),
+        (CloneChoice::Rules, None) if view.url.trim().is_empty() => {
+            "the one the URL's rules name".to_string()
+        }
+        (CloneChoice::Rules, None) => "no rule claims this URL; → picks one".to_string(),
+        (CloneChoice::Rules, Some((p, why))) => format!("{} ({why})", p.name),
+        (CloneChoice::Named(_), Some((p, _))) => format!("{} (picked)", p.name),
+        (CloneChoice::Named(_), None) => String::new(),
+    };
+    let mut lines = vec![
+        field(0, "URL", &view.url),
+        field(1, "Directory", &view.dir),
+        Line::from(vec![
+            Span::styled(format!("{:<label_width$}", "Profile"), style(2)),
+            "‹ ".dim(),
+            profile.into(),
+            " ›".dim(),
+        ]),
+        Line::from(""),
+    ];
+    match &view.error {
+        Some(err) => lines.extend(
+            wrap(err, (width as usize).saturating_sub(2))
+                .into_iter()
+                .map(|l| Line::from(l.red())),
+        ),
+        None => lines.push(Line::from(
+            "Tab next   ←→ change profile   Enter clone   Esc cancel".dim(),
+        )),
+    }
+    let area = centered(frame.area(), width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Clone a repository ")),
+        area,
+    );
+    if view.row < 2 {
+        let value = if view.row == 0 { &view.url } else { &view.dir };
+        let (_, column) = visible(value, Some(value.chars().count()), value_width);
+        let x = area.x + 1 + label_width as u16 + column as u16;
+        if x < area.right() {
+            frame.set_cursor_position((x, area.y + 1 + view.row as u16));
+        }
+    }
+}
+
 /// Every rule that matches the repository, the one that claims it first and
 /// each other with why it lost, then what the rules were matched against;
 /// with no match, rules that would claim it.
@@ -547,6 +623,7 @@ fn render_help(frame: &mut Frame) {
         ("H", "install the hooks that check every commit"),
         ("I", "let git apply your rules by itself"),
         ("w", "why this repo belongs to the profile it does"),
+        ("c", "clone a repository onto the right profile"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -1563,6 +1640,16 @@ mod tests {
             p.paths.clear();
         });
         insta::assert_snapshot!("why_unclaimed", draw(&app));
+    }
+
+    #[test]
+    fn clone_dialog_follows_the_rules() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut view = crate::app::CloneView::new("/home/ada/work".into());
+        view.url = "git@github.com:acme/web.git".into();
+        view.dir = "~/work/web".into();
+        app.mode = Mode::Clone(Box::new(view));
+        insta::assert_snapshot!(draw(&app));
     }
 
     #[test]

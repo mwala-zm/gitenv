@@ -29,6 +29,7 @@ pub enum Mode {
     Doctor(Box<DoctorView>),
     ConfirmSetup(SetupAction),
     Why,
+    Clone(Box<CloneView>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,86 @@ pub type SshProbe = fn(&Path, &str) -> Result<String, String>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pending {
     FixAuthors,
+    Clone,
+}
+
+/// Which profile a clone gets: the one the URL's remote rules name, one
+/// picked by hand, or none, leaving git's own identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneChoice {
+    Rules,
+    Named(usize),
+    Nobody,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloneView {
+    pub url: String,
+    pub dir: String,
+    pub dir_edited: bool,
+    pub row: usize,
+    pub choice: CloneChoice,
+    pub error: Option<String>,
+    pub base: PathBuf,
+}
+
+impl CloneView {
+    pub fn new(base: PathBuf) -> Self {
+        Self {
+            url: String::new(),
+            dir: String::new(),
+            dir_edited: false,
+            row: 0,
+            choice: CloneChoice::Rules,
+            error: None,
+            base,
+        }
+    }
+
+    /// The profile the clone gets and why, or none.
+    pub fn profile<'a>(&self, config: &'a Config) -> Option<(&'a Profile, String)> {
+        match self.choice {
+            CloneChoice::Rules => {
+                rules::for_remote(config, self.url.trim()).map(|(p, why)| (p, why.to_string()))
+            }
+            CloneChoice::Named(i) => config.profiles.get(i).map(|p| (p, "picked".to_string())),
+            CloneChoice::Nobody => None,
+        }
+    }
+
+    /// Steps through the rules' pick, every profile, and none.
+    fn cycle(&mut self, delta: isize, profiles: usize) {
+        let n = profiles as isize + 2;
+        let at = match self.choice {
+            CloneChoice::Rules => 0,
+            CloneChoice::Named(i) => i as isize + 1,
+            CloneChoice::Nobody => n - 1,
+        };
+        self.choice = match (at + delta).rem_euclid(n) {
+            0 => CloneChoice::Rules,
+            i if i == n - 1 => CloneChoice::Nobody,
+            i => CloneChoice::Named(i as usize - 1),
+        };
+    }
+
+    /// Where the clone goes: the directory as typed, `~` expanded and taken
+    /// from the folder next to this repository when relative.
+    pub fn target(&self) -> PathBuf {
+        let dir = git::expand_tilde(Path::new(self.dir.trim()));
+        if dir.is_absolute() {
+            dir
+        } else {
+            self.base.join(dir)
+        }
+    }
+
+    fn follow_url(&mut self) {
+        if !self.dir_edited {
+            self.dir = crate::clone::target_dir(self.url.trim())
+                .map(|d| scan::tildify(&self.base.join(d)))
+                .unwrap_or_default();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +434,7 @@ impl App {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Help | Mode::Why => self.mode = Mode::Normal,
+            Mode::Clone(_) => self.handle_clone_key(key),
             Mode::Edit(_) => self.handle_edit_key(key),
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
             Mode::Scan(_) => self.handle_scan_key(key),
@@ -391,6 +473,9 @@ impl App {
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('D'), _) => self.open_doctor(),
+            (KeyCode::Char('c'), m) if !m.contains(KeyModifiers::CONTROL) => {
+                self.mode = Mode::Clone(Box::new(CloneView::new(self.scan_root.clone())));
+            }
             (KeyCode::Char('w'), _) => {
                 if self.repo.is_some() {
                     self.mode = Mode::Why;
@@ -866,19 +951,126 @@ impl App {
     pub fn pending_needs_terminal(&self) -> bool {
         match (&self.pending, &self.mode) {
             (Some(Pending::FixAuthors), Mode::FixAuthors(view)) => view.signs,
+            (Some(Pending::Clone), _) => true,
             _ => false,
         }
     }
 
-    pub fn run_pending(&mut self) {
-        let Some(Pending::FixAuthors) = self.pending.take() else {
+    /// What to print while the terminal is handed back for the pending work.
+    pub fn pending_note(&self) -> String {
+        match (&self.pending, &self.mode) {
+            (Some(Pending::Clone), Mode::Clone(view)) => {
+                let who = match view.profile(&self.config) {
+                    Some((p, _)) => format!("as profile '{}'", p.name),
+                    None => "with git's own identity".into(),
+                };
+                format!(
+                    "gitenv: cloning {} into {} {who}",
+                    rules::hide_password(view.url.trim()),
+                    scan::tildify(&view.target())
+                )
+            }
+            _ => "gitenv: rewriting commits; sign them if asked".into(),
+        }
+    }
+
+    fn handle_clone_key(&mut self, key: KeyEvent) {
+        let profiles = self.config.profiles.len();
+        let Mode::Clone(view) = &mut self.mode else {
             return;
+        };
+        view.error = None;
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
+            (KeyCode::Esc, _) => self.mode = Mode::Normal,
+            (KeyCode::Tab, _) | (KeyCode::Down, _) => view.row = (view.row + 1) % 3,
+            (KeyCode::BackTab, _) | (KeyCode::Up, _) => view.row = (view.row + 2) % 3,
+            (KeyCode::Left, _) if view.row == 2 => view.cycle(-1, profiles),
+            (KeyCode::Right, _) | (KeyCode::Char(' '), _) if view.row == 2 => {
+                view.cycle(1, profiles)
+            }
+            (KeyCode::Enter, _) => {
+                let target = view.target();
+                view.error = if view.url.trim().is_empty() {
+                    Some("Type or paste the URL to clone".into())
+                } else if view.dir.trim().is_empty() {
+                    Some("Name the directory to clone into".into())
+                } else if std::fs::read_dir(&target).is_ok_and(|mut d| d.next().is_some()) {
+                    Some(format!(
+                        "{} already exists and is not empty",
+                        scan::tildify(&target)
+                    ))
+                } else {
+                    None
+                };
+                if view.error.is_none() {
+                    self.pending = Some(Pending::Clone);
+                }
+            }
+            _ if view.row == 0 => {
+                if filter::edit_line(&mut view.url, key) {
+                    view.follow_url();
+                }
+            }
+            _ if view.row == 1 && filter::edit_line(&mut view.dir, key) => view.dir_edited = true,
+            _ => {}
+        }
+    }
+
+    /// Clones as the dialog says, with the terminal handed back so git can
+    /// ask for a password or a host key, then opens the clone. Returns
+    /// whether the screen should wait before the TUI comes back, which it
+    /// does when the clone failed, so git's own message can be read.
+    fn run_clone(&mut self, view: CloneView) -> bool {
+        let target = view.target();
+        let profile = view.profile(&self.config).map(|(p, _)| p.clone());
+        let outcome = crate::clone::clone(view.url.trim(), &target, profile.as_ref(), &[]);
+        let message = match outcome {
+            Ok(
+                crate::clone::Outcome::Applied(msg)
+                | crate::clone::Outcome::Overridden(msg)
+                | crate::clone::Outcome::Unclaimed(msg),
+            ) => msg,
+            Err(err) => {
+                self.status = Some(format!("Clone failed: {err:#}"));
+                return true;
+            }
+        };
+        self.status = Some(
+            message
+                .trim_start_matches("gitenv: ")
+                .replace('\n', " ")
+                .to_string(),
+        );
+        if let Ok(Some(repo)) = git::discover(&target) {
+            self.repo = Some(repo);
+            self.known_repos = None;
+            self.select_active();
+            if self.setup.is_some() {
+                self.check_setup();
+            }
+        }
+        false
+    }
+
+    /// Runs the work left pending, and says whether the screen should wait
+    /// for Enter before the TUI is drawn again.
+    pub fn run_pending(&mut self) -> bool {
+        if self.pending == Some(Pending::Clone) {
+            self.pending = None;
+            let Mode::Clone(view) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+                return false;
+            };
+            return self.run_clone(*view);
+        }
+        let Some(Pending::FixAuthors) = self.pending.take() else {
+            return false;
         };
         let Mode::FixAuthors(view) = std::mem::replace(&mut self.mode, Mode::Normal) else {
-            return;
+            return false;
         };
         let Some(repo) = &self.repo else {
-            return;
+            return false;
         };
         let chosen = view.chosen();
         let outcome = fix::rewrite_chosen(repo, &view.profile, &view.plan, &chosen, &mut |_, _| {});
@@ -893,6 +1085,7 @@ impl App {
         });
         self.refresh();
         self.select_active();
+        false
     }
 
     /// Reloads what changed on disk since the last look: the profiles file,
@@ -1868,5 +2061,54 @@ mod tests {
             panic!("Enter in the picker saved the form");
         };
         assert_eq!(form.values[crate::form::SIGNING_FORMAT], "ssh");
+    }
+
+    #[test]
+    fn the_clone_dialog_clones_onto_the_picked_profile() {
+        let base = std::env::temp_dir().join(format!("gitenv-app-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let source = base.join("site.git");
+        fix_git(&base, &["init", "-q", "--bare", source.to_str().unwrap()]);
+        let mut client = profile("client");
+        client.email = "ada@client.example".into();
+        let mut app = app_with("clone", vec![profile("personal"), client]);
+        app.scan_root = base.clone();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('c')));
+        type_keys(&mut app, source.to_str().unwrap());
+        let view = |app: &App| match &app.mode {
+            Mode::Clone(v) => v.clone(),
+            _ => panic!("not cloning: {:?}", app.status),
+        };
+        assert_eq!(view(&app).target(), base.join("site"));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        app.handle_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(view(&app).choice, CloneChoice::Named(1));
+
+        std::fs::create_dir_all(base.join("site/taken")).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(view(&app).error.unwrap().contains("already exists"));
+        std::fs::remove_dir_all(base.join("site")).unwrap();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.pending, Some(Pending::Clone));
+        assert!(app.pending_needs_terminal());
+        assert!(
+            app.pending_note().contains("as profile 'client'"),
+            "{}",
+            app.pending_note()
+        );
+        assert!(!app.run_pending(), "{:?}", app.status);
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.repo.as_ref().unwrap().root.file_name().unwrap(), "site");
+        assert_eq!(app.active_profile().unwrap().name, "client");
+        assert_eq!(
+            fix_git(&base.join("site"), &["config", "user.email"]),
+            "ada@client.example"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

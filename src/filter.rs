@@ -55,25 +55,33 @@ impl Filter {
         if !self.typing {
             return false;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Enter => self.typing = false,
             KeyCode::Esc => self.clear(),
-            KeyCode::Backspace => {
-                self.query.pop();
-            }
-            KeyCode::Char('u') if ctrl => self.query.clear(),
-            KeyCode::Char('w') if ctrl => {
-                let kept = self.query.trim_end().rfind(' ').map_or(0, |i| i + 1);
-                self.query.truncate(kept);
-            }
-            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
-                self.query.push(c)
-            }
-            _ => return false,
+            _ => return edit_line(&mut self.query, key),
         }
         true
     }
+}
+
+/// Edits a one-line text at its end as a shell does: typing, Backspace,
+/// Ctrl-U to clear it and Ctrl-W to drop the last word. Says whether the
+/// key was one of those.
+pub fn edit_line(text: &mut String, key: KeyEvent) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Backspace => {
+            text.pop();
+        }
+        KeyCode::Char('u') if ctrl => text.clear(),
+        KeyCode::Char('w') if ctrl => {
+            let kept = text.trim_end().rfind([' ', '/']).map_or(0, |i| i + 1);
+            text.truncate(kept);
+        }
+        KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => text.push(c),
+        _ => return false,
+    }
+    true
 }
 
 /// Whether `query[qi..]` matches from `lower[from..]`, where `adjacent`
