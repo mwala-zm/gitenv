@@ -813,6 +813,7 @@ mod tests {
             config_text: None,
             pending: None,
             profile_filter: Default::default(),
+            watch: Default::default(),
         }
     }
 

@@ -15,10 +15,12 @@ mod report;
 mod rules;
 mod scan;
 mod ui;
+mod watch;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -317,18 +319,21 @@ fn resolve_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Draws and handles keys until the app quits. Work the app leaves pending
+/// Draws and handles keys until the app quits, looking for changes on disk
+/// at least twice a second. Work the app leaves pending
 /// runs between frames, with the terminal handed back first when it may ask
 /// for a passphrase, since pinentry and ssh cannot prompt while the UI holds
 /// the screen in raw mode.
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::render(frame, app))?;
-        if let Event::Key(key) = event::read()?
+        if event::poll(Duration::from_millis(500))?
+            && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             app.handle_key(key);
         }
+        app.tick();
         if app.pending.is_some() {
             if app.pending_needs_terminal() {
                 ratatui::restore();

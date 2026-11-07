@@ -226,6 +226,12 @@ endings, and writes into the same file, so its permissions, owner, ACLs and
 hard links stay. If the file changed on disk while the TUI was open, gitenv
 refuses to save over it; press `r` to reload.
 
+The TUI also notices changes on its own, twice a second: an edited
+profiles file, or a repository whose config, branch or commits changed
+under it, say from a commit in another terminal. It reloads them while
+you are in a list, and waits until you close a form, a delete
+confirmation or the fix-authors view.
+
 ## Rules
 
 Without rules, gitenv is content as long as a repository's identity is *one

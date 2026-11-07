@@ -12,6 +12,7 @@ use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
 use crate::rules::{self, Reason};
 use crate::scan::{self, Row};
+use crate::watch::{self, Watch};
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -112,6 +113,7 @@ pub struct App {
     pub config_text: Option<String>,
     pub pending: Option<Pending>,
     pub profile_filter: Filter,
+    pub watch: Watch,
 }
 
 impl App {
@@ -164,6 +166,7 @@ impl App {
             config_text,
             pending: None,
             profile_filter: Filter::default(),
+            watch: Watch::default(),
         };
         app.select_active();
         if started_outside {
@@ -661,6 +664,48 @@ impl App {
         self.select_active();
     }
 
+    /// Reloads what changed on disk since the last look: the profiles file,
+    /// when something other than gitenv wrote it, and the repository, when
+    /// its config, its HEAD or the global git config moved. Only the lists
+    /// reload, so a form, a delete or a rewrite never finds its profile moved;
+    /// they catch up once closed. A profiles file that fails to load is
+    /// reported once, not on every look. The first look at a repository
+    /// re-reads it after noting its files, so a change made while it was
+    /// first read is not taken as the starting point.
+    pub fn tick(&mut self) {
+        if !matches!(self.mode, Mode::Normal | Mode::Scan(_) | Mode::Help) {
+            return;
+        }
+        let on_disk = std::fs::read_to_string(&self.config_path).ok();
+        if on_disk != self.config_text && self.watch.config_tried.as_ref() != Some(&on_disk) {
+            self.watch.config_tried = Some(on_disk);
+            let before = self.config.clone();
+            self.reload_config();
+            if self.config != before {
+                self.status = Some("The profiles file changed on disk; reloaded it".into());
+                if matches!(self.mode, Mode::Scan(_)) {
+                    self.rescan();
+                }
+            }
+        }
+
+        let Some(root) = self.repo.as_ref().map(|r| r.root.clone()) else {
+            return;
+        };
+        if self.watch.repo_root.as_ref() != Some(&root) {
+            self.watch.repo_files = watch::repo_files(&root);
+            self.watch.repo_stamps = watch::stamps(&self.watch.repo_files);
+            self.watch.repo_root = Some(root);
+            self.refresh();
+            return;
+        }
+        let stamps = watch::stamps(&self.watch.repo_files);
+        if stamps != self.watch.repo_stamps {
+            self.watch.repo_stamps = stamps;
+            self.refresh();
+        }
+    }
+
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -734,6 +779,7 @@ mod tests {
             config_text: None,
             pending: None,
             profile_filter: Filter::default(),
+            watch: Watch::default(),
         }
     }
 
@@ -1148,5 +1194,56 @@ mod tests {
         assert_eq!(app.selected, 1);
         assert!(!app.profile_filter.is_active());
         std::fs::remove_file(&app.config_path).ok();
+    }
+
+    #[test]
+    fn tick_reloads_a_profiles_file_changed_elsewhere_but_not_mid_form() {
+        let mut app = app_with("tick", vec![profile("a")]);
+        app.save_profile(Some(0), profile("a")).unwrap();
+        app.tick();
+        assert_eq!(app.status.as_deref(), Some("Saved profile 'a'"));
+
+        let mut text = std::fs::read_to_string(&app.config_path).unwrap();
+        text.push_str("\n[[profiles]]\nname = \"b\"\nuser_name = \"B\"\nemail = \"b@x\"\n");
+        std::fs::write(&app.config_path, &text).unwrap();
+        app.mode = Mode::Edit(Box::new(Form::new()));
+        app.tick();
+        assert_eq!(app.config.profiles.len(), 1);
+
+        app.mode = Mode::Normal;
+        app.tick();
+        assert_eq!(app.config.profiles.len(), 2);
+        assert!(app.status.as_deref().unwrap().contains("changed on disk"));
+
+        std::fs::write(&app.config_path, "not toml [").unwrap();
+        app.tick();
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Could not read config")
+        );
+        app.status = None;
+        app.tick();
+        assert_eq!(app.status, None, "a broken file is reported once");
+        std::fs::remove_file(&app.config_path).ok();
+    }
+
+    #[test]
+    fn tick_refreshes_the_repo_when_its_config_changes() {
+        let dir = fix_repo("tick");
+        let mut app = app_with("tickrepo", vec![profile("a")]);
+        app.repo = git::discover(&dir).unwrap();
+        app.tick();
+        fix_git(
+            &dir,
+            &["config", "--local", "user.email", "ada@acme.example"],
+        );
+        app.tick();
+        assert_eq!(
+            app.repo.as_ref().unwrap().effective.email.as_deref(),
+            Some("ada@acme.example")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
