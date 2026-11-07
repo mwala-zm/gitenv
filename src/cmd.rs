@@ -16,6 +16,21 @@ pub fn load(dir: &Path) -> Result<(Config, Repo)> {
     Ok((config, repo))
 }
 
+pub fn profiles() -> ExitCode {
+    match Config::path().and_then(|path| Config::load(&path)) {
+        Ok(config) => {
+            for profile in &config.profiles {
+                println!("{}", profile.name);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("gitenv: {err:#}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 pub fn apply(name: Option<&str>, dir: &Path) -> ExitCode {
     match try_apply(name, dir) {
         Ok((msg, true)) => {

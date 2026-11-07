@@ -187,6 +187,11 @@ enum Command {
         #[arg(long, short, default_value = ".")]
         path: PathBuf,
     },
+    /// List the profile names, one per line
+    ///
+    /// For shell and editor completion. Exits 2 when the profiles file
+    /// cannot be read.
+    Profiles,
     /// Install or remove `gitenv check` as pre-commit and pre-push hooks
     Hook {
         #[command(subcommand)]
@@ -259,6 +264,7 @@ fn main() -> Result<ExitCode> {
             profile,
             git_args,
         })),
+        Some(Command::Profiles) => Ok(cmd::profiles()),
         Some(Command::Status { short, path }) => Ok(in_dir(path, |dir| cmd::status(short, dir))),
         Some(Command::Scan { dir, problems, fix }) => Ok(in_dir(dir, |dir| {
             scan::run(
