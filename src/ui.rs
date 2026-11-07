@@ -106,6 +106,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
         Mode::Doctor(view) => render_doctor(frame, view),
         Mode::ConfirmSetup(action) => render_confirm_setup(frame, *action, app),
+        Mode::Why => render_why(frame, app),
         Mode::Scan(_) | Mode::FixAuthors(_) => {}
     }
 }
@@ -398,6 +399,93 @@ fn short_path(path: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
+/// Every rule that matches the repository, the one that claims it first and
+/// each other with why it lost, then what the rules were matched against;
+/// with no match, rules that would claim it.
+fn render_why(frame: &mut Frame, app: &App) {
+    let Some(repo) = &app.repo else {
+        return;
+    };
+    let width: u16 = 80;
+    let text_width = width as usize - 2;
+    let found = rules::matching(&app.config, repo);
+    let subjects = rules::remote_subjects(repo);
+    let root = scan::tildify(&repo.root);
+    let mut lines = Vec::new();
+    match found.first() {
+        None => {
+            lines.push(Line::from("No rule claims this repository.".bold()));
+            lines.push(Line::from(""));
+            let mut ideas: Vec<String> = subjects
+                .iter()
+                .filter_map(|s| {
+                    let mut parts = s.split('/');
+                    let host = parts.next()?;
+                    let owner = parts.next()?;
+                    Some(format!("{host}/{owner}/*"))
+                })
+                .collect();
+            ideas.push(format!("{root}/**"));
+            ideas.dedup();
+            for line in wrap(
+                &format!(
+                    "A rule like {} in a profile would claim it; N starts a profile with one.",
+                    ideas.join(" or ")
+                ),
+                text_width,
+            ) {
+                lines.push(Line::from(line.dim()));
+            }
+        }
+        Some(winner) => {
+            let name_width = found
+                .iter()
+                .map(|r| r.profile.name.chars().count())
+                .max()
+                .unwrap_or(0);
+            lines.push(Line::from(vec![
+                "'".into(),
+                winner.profile.name.clone().bold(),
+                "' claims this repository. Rules that match, strongest first:".into(),
+            ]));
+            lines.push(Line::from(""));
+            for (i, rule) in found.iter().enumerate() {
+                let head = format!(
+                    "{:<name_width$}  {:<6}  {}",
+                    rule.profile.name,
+                    rule.reason.kind(),
+                    rule.reason.pattern()
+                );
+                if i == 0 {
+                    lines.push(Line::from(vec!["✔ ".green(), head.green().bold()]));
+                } else {
+                    lines.push(Line::from(vec!["  ".into(), head.into()]));
+                    for part in wrap(&rules::why_lost(winner, rule), text_width - 4) {
+                        lines.push(Line::from(format!("    {part}").dim()));
+                    }
+                }
+            }
+        }
+    }
+    lines.push(Line::from(""));
+    let label = |l: &str| Span::styled(format!("{l:<8}"), Style::new().dim());
+    let remote = if subjects.is_empty() {
+        "(no remote)".to_string()
+    } else {
+        subjects.join(", ")
+    };
+    lines.push(Line::from(vec![label("remote"), remote.into()]));
+    lines.push(Line::from(vec![label("path"), root.into()]));
+    lines.push(Line::from(""));
+    lines.push(Line::from("any key closes".dim()));
+    let area = centered(frame.area(), width, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Why this profile? ")),
+        area,
+    );
+}
+
 /// Doctor's findings for one profile, each wrapped under its level, with a
 /// note while the logins are still being checked.
 fn render_doctor(frame: &mut Frame, view: &DoctorView) {
@@ -458,16 +546,10 @@ fn render_help(frame: &mut Frame) {
         ("D", "check the selected profile's keys and logins"),
         ("H", "install the hooks that check every commit"),
         ("I", "let git apply your rules by itself"),
+        ("w", "why this repo belongs to the profile it does"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
-        ("", ""),
-        ("Applying writes user.name, user.email and, when set,", ""),
-        (
-            "user.signingkey, gpg.format, commit.gpgsign, core.sshCommand",
-            "",
-        ),
-        ("and any extra keys into .git/config.", ""),
         ("", ""),
         ("● marks the profile git is using here; ◆ marks the one", ""),
         ("whose remote or path rules claim this repo.", ""),
@@ -1461,6 +1543,26 @@ mod tests {
         form.cursor = form.values[form.field].chars().count();
         app.mode = Mode::Edit(Box::new(form));
         insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn why_lists_the_matching_rules_and_why_each_lost() {
+        let mut app = app(profiles(), Some(repo()));
+        app.config.profiles[0].paths = vec!["/home/ada/work/**".into()];
+        app.config.profiles.push(Profile {
+            name: "agency".into(),
+            user_name: "Ada".into(),
+            email: "ada@agency.example".into(),
+            remotes: vec!["github.com/**".into()],
+            ..Default::default()
+        });
+        app.mode = Mode::Why;
+        insta::assert_snapshot!("why_claimed", draw(&app));
+        app.config.profiles.iter_mut().for_each(|p| {
+            p.remotes.clear();
+            p.paths.clear();
+        });
+        insta::assert_snapshot!("why_unclaimed", draw(&app));
     }
 
     #[test]

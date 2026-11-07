@@ -119,6 +119,7 @@ someone else.
 | `N` | create a profile from this repo's identity and remote |
 | `d` | delete the selected profile (asks first) |
 | `r` | re-read the repo and the profiles file |
+| `w` | why this repo belongs to the profile it does |
 | `s` | list every repository next to this one |
 | `f` | re-author unpushed commits made as someone else |
 | `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
@@ -127,6 +128,13 @@ someone else.
 | `I` | let git apply your rules by itself (`gitenv export --install`) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
+
+`w` explains the choice: every rule that matches this repository, the one
+that claims it first, and for each of the others why it lost (a remote
+rule beats a path rule, a longer text before the first wildcard beats a
+shorter one, and between equals the earlier profile wins), with the
+remote and path the rules were matched against. When none matches, it
+suggests a rule that would.
 
 `N` starts a new profile from what git uses here: the name, email and
 signing settings, the ssh key an `ssh -i` core.sshCommand offers, and a

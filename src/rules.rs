@@ -237,6 +237,48 @@ fn candidates<'a>(config: &'a Config, urls: &[String], root: Option<&str>) -> Ve
     found
 }
 
+impl Reason {
+    /// The rule as written in the profile.
+    pub fn pattern(&self) -> &str {
+        match self {
+            Reason::Remote(p) | Reason::Path(p) => p,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Reason::Remote(_) => "remote",
+            Reason::Path(_) => "path",
+        }
+    }
+}
+
+/// Why `other` loses to `winner`, both matching the same repository, in the
+/// terms of the ranking: a remote rule beats a path rule, then the longer
+/// text before the first wildcard, then the profile earlier in the file.
+pub fn why_lost(winner: &Rule, other: &Rule) -> String {
+    let prefix = |rule: &Rule| match rule.reason {
+        Reason::Remote(_) => literal_prefix(&rule.pattern).to_string(),
+        Reason::Path(_) => crate::scan::tildify(Path::new(literal_prefix(&rule.pattern))),
+    };
+    if std::ptr::eq(winner.profile, other.profile) {
+        format!("another rule of '{}' is more specific", winner.profile.name)
+    } else if winner.rank.0 != other.rank.0 {
+        "a remote rule beats a path rule".to_string()
+    } else if winner.rank.1 != other.rank.1 {
+        format!(
+            "'{}' is more specific than '{}'",
+            prefix(winner),
+            prefix(other)
+        )
+    } else {
+        format!(
+            "just as specific, and '{}' comes first in the file",
+            winner.profile.name
+        )
+    }
+}
+
 pub fn literal_prefix(pattern: &str) -> &str {
     &pattern[..literal_len(pattern)]
 }
@@ -481,6 +523,59 @@ mod tests {
         assert_eq!(
             normalize_remote("git@x.example:TEAM/REPO.GIT"),
             "x.example/team/repo"
+        );
+    }
+
+    #[test]
+    fn every_loss_names_the_tie_breaker() {
+        let profile = |name: &str, remotes: &[&str], paths: &[&str]| Profile {
+            name: name.into(),
+            remotes: remotes.iter().map(|s| s.to_string()).collect(),
+            paths: paths.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let config = Config {
+            profiles: vec![
+                profile("acme", &["github.com/acme/*", "github.com/acme/api"], &[]),
+                profile("twin", &["github.com/acme/*"], &[]),
+                profile("broad", &["github.com/**"], &["/work/**"]),
+            ],
+        };
+        let repo = Repo {
+            root: "/work/acme/api".into(),
+            remote: Some("git@github.com:acme/api.git".into()),
+            effective: Default::default(),
+            local: Default::default(),
+            authors: Vec::new(),
+        };
+        let found = matching(&config, &repo);
+        let order: Vec<(&str, &str)> = found
+            .iter()
+            .map(|r| (r.profile.name.as_str(), r.reason.pattern()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("acme", "github.com/acme/api"),
+                ("acme", "github.com/acme/*"),
+                ("twin", "github.com/acme/*"),
+                ("broad", "github.com/**"),
+                ("broad", "/work/**"),
+            ]
+        );
+        let why: Vec<String> = found[1..].iter().map(|r| why_lost(&found[0], r)).collect();
+        assert_eq!(
+            why,
+            [
+                "another rule of 'acme' is more specific",
+                "'github.com/acme/api' is more specific than 'github.com/acme/'",
+                "'github.com/acme/api' is more specific than 'github.com/'",
+                "a remote rule beats a path rule",
+            ]
+        );
+        assert_eq!(
+            why_lost(&found[1], &found[2]),
+            "just as specific, and 'acme' comes first in the file"
         );
     }
 }

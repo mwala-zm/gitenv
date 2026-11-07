@@ -28,6 +28,7 @@ pub enum Mode {
     FixAuthors(Box<FixView>),
     Doctor(Box<DoctorView>),
     ConfirmSetup(SetupAction),
+    Why,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,7 +352,7 @@ impl App {
         }
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
-            Mode::Help => self.mode = Mode::Normal,
+            Mode::Help | Mode::Why => self.mode = Mode::Normal,
             Mode::Edit(_) => self.handle_edit_key(key),
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
             Mode::Scan(_) => self.handle_scan_key(key),
@@ -390,6 +391,13 @@ impl App {
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('D'), _) => self.open_doctor(),
+            (KeyCode::Char('w'), _) => {
+                if self.repo.is_some() {
+                    self.mode = Mode::Why;
+                } else {
+                    self.status = Some("Not inside a git repository".into());
+                }
+            }
             (KeyCode::Char('H'), _) => self.ask_setup(SetupAction::Hooks),
             (KeyCode::Char('I'), _) => self.ask_setup(SetupAction::Includes),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
