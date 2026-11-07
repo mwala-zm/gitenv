@@ -72,6 +72,12 @@ impl Row {
         }
     }
 
+    /// Whether a rule says this repository belongs to another profile, which
+    /// is what fixing it can put right.
+    pub fn is_fixable(&self) -> bool {
+        self.fixed.is_none() && matches!(self.verdict, Verdict::WrongProfile { .. })
+    }
+
     pub fn profile_column(&self) -> String {
         short_status(&self.verdict)
     }
@@ -116,39 +122,51 @@ pub fn scan(config: &Config, root: &Path, opts: &Options) -> Result<(Vec<Row>, V
 
 /// One `git` process per repository: the walk found its top level already and
 /// the table shows no history. With `fix`, a wrong repository a rule claims
-/// gets that profile and is read again; a fix that worktree config or the
-/// environment overrides is reported and the row stays wrong. Fixes run one
-/// at a time, since a repository and its worktrees share a config file.
+/// gets that profile, as [`fix`] does. Fixes run one at a time, since a
+/// repository and its worktrees share a config file.
 fn inspect(config: &Config, path: &Path, opts: &Options) -> Result<Row, String> {
     let Some(repo) = git::open(path.to_path_buf(), 0) else {
         return Err(format!("skipped {}: git cannot read it", tildify(path)));
     };
     let verdict = check::verdict(config, &repo);
-    let mut fixed = None;
-    if opts.fix
-        && let Verdict::WrongProfile { .. } = &verdict
-        && let Some((profile, _)) = rules::expected(config, &repo)
-    {
-        let _one_at_a_time = FIX.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(err) = git::apply(&repo, profile) {
-            eprintln!("gitenv: could not fix {}: {err:#}", tildify(path));
-        } else if git::open(path.to_path_buf(), 0)
-            .is_some_and(|fresh| check::verdict(config, &fresh).is_ok())
-        {
-            fixed = Some(profile.name.clone());
-        } else {
-            eprintln!(
-                "gitenv: applied '{}' to {} but git still uses another identity there",
-                profile.name,
-                tildify(path)
-            );
-        }
-    }
-    Ok(Row {
+    let mut row = Row {
         repo,
         verdict,
-        fixed,
-    })
+        fixed: None,
+    };
+    if opts.fix && row.is_fixable() {
+        let _one_at_a_time = FIX.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(err) = fix(config, &mut row) {
+            eprintln!("gitenv: {err}");
+        }
+    }
+    Ok(row)
+}
+
+/// Applies the profile a rule claims a wrong repository for, then reads it
+/// again. Only a repository git then commits in as that profile counts as
+/// fixed; one that worktree config or the environment still overrides is
+/// an error. The row keeps the verdict it had, so it still shows what was
+/// wrong next to `fixed`. gh is left alone, since its account
+/// is global and the last repository fixed would win.
+pub fn fix(config: &Config, row: &mut Row) -> Result<(), String> {
+    let path = row.repo.root.clone();
+    let Some((profile, _)) = rules::expected(config, &row.repo) else {
+        return Err(format!("no rule claims {}", tildify(&path)));
+    };
+    git::apply(&row.repo, profile)
+        .map_err(|err| format!("could not fix {}: {err:#}", tildify(&path)))?;
+    let fresh = git::open(path.clone(), 0)
+        .ok_or_else(|| format!("could not read {} again", tildify(&path)))?;
+    if !check::verdict(config, &fresh).is_ok() {
+        return Err(format!(
+            "applied '{}' to {} but git still uses another identity there",
+            profile.name,
+            tildify(&path)
+        ));
+    }
+    row.fixed = Some(profile.name.clone());
+    Ok(())
 }
 
 pub fn render(rows: &[Row], opts: &Options) -> String {

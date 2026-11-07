@@ -149,6 +149,13 @@ In the repository list (`s`), `Enter` applies the profile a rule claims for
 the highlighted repository, `o` opens it in the main view, `r` rescans and
 `Esc` goes back.
 
+To fix several at once, `space` marks the highlighted repository and `a`
+marks every wrong one shown (or, when they all are, none). `F` lists the
+marked ones and, once you confirm, gives each the profile its rules name,
+as `gitenv scan --fix` does, leaving gh alone. `w` shows only the
+repositories that are not right yet, so the list shrinks as you fix them.
+Marks survive `r`.
+
 `/` filters the profiles or the repository list as you type. Each letter
 has to start a word or follow the one before, so `acm` finds `acme` and
 `aapi` finds `acme/api`; spaces only separate words. Profiles match on

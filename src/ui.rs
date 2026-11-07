@@ -78,6 +78,9 @@ fn draw(frame: &mut Frame, app: &App) {
     if let Mode::Scan(view) = &app.mode {
         render_scan(frame, body, view);
         render_footer(frame, footer, app);
+        if view.confirming {
+            render_confirm_scan(frame, view);
+        }
         return;
     }
     if let Mode::FixAuthors(view) = &app.mode {
@@ -114,12 +117,19 @@ fn filter_title(filter: &Filter) -> String {
 
 fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
     let ok = view.rows.iter().filter(|r| r.is_ok()).count();
-    let title = format!(
-        " Repositories under {}: {ok} of {} on the right profile {}",
+    let marked = view.to_fix().len();
+    let mut title = format!(
+        " Repositories under {}: {ok} of {} on the right profile ",
         scan::tildify(&view.root),
         view.rows.len(),
-        filter_title(&view.filter)
     );
+    if marked > 0 {
+        title.push_str(&format!("· {marked} marked "));
+    }
+    if view.wrong_only {
+        title.push_str("· problems only ");
+    }
+    title.push_str(&filter_title(&view.filter));
     let visible = view.visible();
     let width = view
         .rows
@@ -130,8 +140,13 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
         .max("PROFILE".len());
     let mut items: Vec<ListItem> = visible
         .iter()
-        .map(|&i| &view.rows[i])
-        .map(|row| {
+        .map(|&i| (&view.rows[i], view.marked.get(i).copied().unwrap_or(false)))
+        .map(|(row, marked)| {
+            let mark = match (row.is_fixable(), marked) {
+                (true, true) => "[x] ".green(),
+                (true, false) => "[ ] ".into(),
+                (false, _) => "    ".into(),
+            };
             let word = row.status_word();
             let colour = match word {
                 "ok" | "fixed" => Color::Green,
@@ -139,15 +154,10 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
                 _ => Color::Yellow,
             };
             ListItem::new(Line::from(vec![
+                mark,
                 Span::styled(format!("{word:<6}"), Style::new().fg(colour)),
                 Span::raw(format!("{:<width$}  ", row.profile_column())),
-                Span::styled(
-                    match row.repo.root.strip_prefix(&view.root) {
-                        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
-                        _ => scan::tildify(&row.repo.root),
-                    },
-                    Style::new().dim(),
-                ),
+                Span::styled(shown_path(view, &row.repo.root), Style::new().dim()),
             ]))
         })
         .collect();
@@ -316,6 +326,71 @@ fn render_confirm_fix(frame: &mut Frame, view: &FixView) {
         Paragraph::new(lines).block(Block::bordered().title(" Fix authors ")),
         area,
     );
+}
+
+fn render_confirm_scan(frame: &mut Frame, view: &ScanView) {
+    let todo = view.to_fix();
+    let noun = if todo.len() == 1 {
+        "repository"
+    } else {
+        "repositories"
+    };
+    let mut lines = vec![
+        Line::from(format!("Fix {} {noun}?", todo.len()).bold()),
+        Line::from(""),
+    ];
+    const SHOWN: usize = 8;
+    for &i in todo.iter().take(SHOWN) {
+        let row = &view.rows[i];
+        lines.push(Line::from(vec![
+            Span::raw(format!(
+                "{:<28} ",
+                short_path(&shown_path(view, &row.repo.root), 28)
+            )),
+            row.profile_column().yellow(),
+        ]));
+    }
+    if todo.len() > SHOWN {
+        lines.push(Line::from(format!("and {} more", todo.len() - SHOWN).dim()));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from("Each gets the profile its rules name.".dim()),
+        Line::from("gh is left alone, since its account is global.".dim()),
+        Line::from(""),
+        Line::from(vec![
+            " y / Enter ".bold(),
+            "fix   ".dim(),
+            " any other key ".bold(),
+            "cancel".dim(),
+        ]),
+    ]);
+    let area = centered(frame.area(), 64, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Fix repositories ")),
+        area,
+    );
+}
+
+/// A repository's path as the list shows it: relative to the folder
+/// scanned, or from `~` when it is that folder itself.
+fn shown_path(view: &ScanView, root: &std::path::Path) -> String {
+    match root.strip_prefix(&view.root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        _ => scan::tildify(root),
+    }
+}
+
+/// `path` cut to `width` characters from the left, keeping its end, which
+/// names the repository.
+fn short_path(path: &str, width: usize) -> String {
+    let count = path.chars().count();
+    if count <= width {
+        return path.to_string();
+    }
+    let tail: String = path.chars().skip(count - (width - 1)).collect();
+    format!("…{tail}")
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -745,18 +820,22 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "clear it".dim(),
         ]),
         None if matches!(app.mode, Mode::Scan(_)) => Line::from(vec![
-            " ↑↓/jk ".bold(),
-            "select  ".dim(),
+            " space ".bold(),
+            "mark  ".dim(),
+            " a ".bold(),
+            "all  ".dim(),
+            " F ".bold(),
+            "fix marked  ".dim(),
             " Enter ".bold(),
-            "apply the rule's profile  ".dim(),
+            "fix one  ".dim(),
             " o ".bold(),
             "open  ".dim(),
-            " r ".bold(),
-            "rescan  ".dim(),
+            " w ".bold(),
+            "problems  ".dim(),
+            " / ".bold(),
+            "filter  ".dim(),
             " Esc ".bold(),
-            "back  ".dim(),
-            " q ".bold(),
-            "quit".dim(),
+            "back".dim(),
         ]),
         None if matches!(app.mode, Mode::FixAuthors(_)) => Line::from(vec![
             " ↑↓/jk ".bold(),
@@ -988,6 +1067,43 @@ mod tests {
     }
 
     #[test]
+    fn scan_view_with_marks_and_the_fix_popup() {
+        use crate::check::Verdict;
+        use crate::rules::Reason;
+        use crate::scan::Row;
+        let wrong = |root: &str| Row {
+            repo: Repo {
+                root: root.into(),
+                ..repo()
+            },
+            verdict: Verdict::WrongProfile {
+                root: root.into(),
+                expected: "acme".into(),
+                reason: Reason::Remote("github.com/acme/*".into()),
+                actual: Some("personal".into()),
+                identity: Identity::default(),
+            },
+            fixed: None,
+        };
+        let mut app = app(profiles(), Some(repo()));
+        let mut view = ScanView::new(
+            "/home/ada/work".into(),
+            vec![
+                wrong("/home/ada/work/acme/api"),
+                wrong("/home/ada/work/acme/web"),
+                wrong("/home/ada/work/acme/infra"),
+            ],
+        );
+        view.marked = vec![true, false, true];
+        view.wrong_only = true;
+        app.mode = Mode::Scan(Box::new(view.clone()));
+        insta::assert_snapshot!("scan_marks", draw(&app));
+        view.confirming = true;
+        app.mode = Mode::Scan(Box::new(view));
+        insta::assert_snapshot!("scan_fix_popup", draw(&app));
+    }
+
+    #[test]
     fn scan_view() {
         use crate::check::Verdict;
         use crate::rules::Reason;
@@ -1001,9 +1117,9 @@ mod tests {
             fixed: None,
         };
         let mut app = app(profiles(), Some(repo()));
-        app.mode = Mode::Scan(Box::new(ScanView {
-            root: "/home/ada/work".into(),
-            rows: vec![
+        app.mode = Mode::Scan(Box::new(ScanView::new(
+            "/home/ada/work".into(),
+            vec![
                 row(
                     "/home/ada/work/acme/api",
                     Verdict::WrongProfile {
@@ -1024,9 +1140,10 @@ mod tests {
                     },
                 ),
             ],
-            selected: 1,
-            filter: Default::default(),
-        }));
+        )));
+        if let Mode::Scan(view) = &mut app.mode {
+            view.selected = 1;
+        }
         insta::assert_snapshot!(draw(&app));
     }
 

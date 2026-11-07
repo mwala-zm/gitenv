@@ -73,20 +73,43 @@ pub struct ScanView {
     pub rows: Vec<Row>,
     pub selected: usize,
     pub filter: Filter,
+    pub marked: Vec<bool>,
+    pub wrong_only: bool,
+    pub confirming: bool,
 }
 
 impl ScanView {
+    pub fn new(root: PathBuf, rows: Vec<Row>) -> Self {
+        Self {
+            root,
+            marked: vec![false; rows.len()],
+            rows,
+            selected: 0,
+            filter: Filter::default(),
+            wrong_only: false,
+            confirming: false,
+        }
+    }
+
+    /// The marked rows that can still be fixed.
+    pub fn to_fix(&self) -> Vec<usize> {
+        (0..self.rows.len())
+            .filter(|&i| self.marked.get(i).copied().unwrap_or(false) && self.rows[i].is_fixable())
+            .collect()
+    }
+
     /// The rows the filter lets through, matched on the path shown and the
-    /// profile column.
+    /// profile column, less those already right while only problems show.
     pub fn visible(&self) -> Vec<usize> {
         (0..self.rows.len())
             .filter(|&i| {
                 let row = &self.rows[i];
-                self.filter.matches(&format!(
-                    "{} {}",
-                    scan::tildify(&row.repo.root),
-                    row.profile_column()
-                ))
+                (!self.wrong_only || !row.is_ok())
+                    && self.filter.matches(&format!(
+                        "{} {}",
+                        scan::tildify(&row.repo.root),
+                        row.profile_column()
+                    ))
             })
             .collect()
     }
@@ -440,14 +463,7 @@ impl App {
             Ok(rows) if rows.is_empty() => {
                 self.status = Some(format!("No repositories under {}", scan::tildify(&root)));
             }
-            Ok(rows) => {
-                self.mode = Mode::Scan(Box::new(ScanView {
-                    root,
-                    rows,
-                    selected: 0,
-                    filter: Filter::default(),
-                }))
-            }
+            Ok(rows) => self.mode = Mode::Scan(Box::new(ScanView::new(root, rows))),
             Err(err) => self.status = Some(format!("Could not scan: {err}")),
         }
     }
@@ -462,6 +478,16 @@ impl App {
             match rows {
                 Ok(rows) => {
                     view.selected = view.selected.min(rows.len().saturating_sub(1));
+                    let marked: Vec<&Path> = view
+                        .to_fix()
+                        .into_iter()
+                        .map(|i| view.rows[i].repo.root.as_path())
+                        .collect();
+                    let marked: Vec<bool> = rows
+                        .iter()
+                        .map(|r| marked.contains(&r.repo.root.as_path()))
+                        .collect();
+                    view.marked = marked;
                     view.rows = rows;
                     view.keep_selection_visible();
                 }
@@ -474,6 +500,15 @@ impl App {
         let Mode::Scan(view) = &mut self.mode else {
             return;
         };
+        if view.confirming {
+            view.confirming = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                self.fix_marked();
+            } else {
+                self.status = Some("Nothing was changed".into());
+            }
+            return;
+        }
         if view.filter.handle_key(key) {
             view.keep_selection_visible();
             return;
@@ -483,6 +518,45 @@ impl App {
                 self.should_quit = true
             }
             (KeyCode::Char('/'), _) => view.filter.start(),
+            (KeyCode::Char(' '), _) => {
+                let Some(row) = view.current() else {
+                    return;
+                };
+                if row.is_fixable() {
+                    let i = view.selected;
+                    view.marked[i] = !view.marked[i];
+                } else {
+                    self.status = Some(match row.status_word() {
+                        "none" => "No rule claims this repo, so there is nothing to fix; press o to open it".into(),
+                        _ => "This repo is already on the right profile".into(),
+                    });
+                }
+            }
+            (KeyCode::Char('a'), _) => {
+                let wrong: Vec<usize> = view
+                    .visible()
+                    .into_iter()
+                    .filter(|&i| view.rows[i].is_fixable())
+                    .collect();
+                let all = wrong.iter().all(|&i| view.marked[i]);
+                for i in wrong {
+                    view.marked[i] = !all;
+                }
+            }
+            (KeyCode::Char('w'), _) => {
+                view.wrong_only = !view.wrong_only;
+                view.keep_selection_visible();
+            }
+            (KeyCode::Char('F'), _) => {
+                if view.to_fix().is_empty() {
+                    self.status = Some(
+                        "Nothing is marked; press space to mark a repo or a to mark every wrong one"
+                            .into(),
+                    );
+                } else {
+                    view.confirming = true;
+                }
+            }
             (KeyCode::Esc, _) if view.filter.is_active() => view.filter.clear(),
             (KeyCode::Esc, _) | (KeyCode::Char('s'), _) => self.mode = Mode::Normal,
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -705,6 +779,49 @@ impl App {
         let stamps = watch::stamps(&self.watch.repo_files);
         if stamps != self.watch.repo_stamps {
             self.watch.repo_stamps = stamps;
+            self.refresh();
+        }
+    }
+
+    /// Gives every marked repository the profile its rules name, as `scan
+    /// --fix` does, and says how many worked and why any did not.
+    fn fix_marked(&mut self) {
+        let Mode::Scan(view) = &mut self.mode else {
+            return;
+        };
+        let todo = view.to_fix();
+        let mut errors = Vec::new();
+        let mut current = false;
+        for &i in &todo {
+            match scan::fix(&self.config, &mut view.rows[i]) {
+                Ok(()) => {
+                    current |= self
+                        .repo
+                        .as_ref()
+                        .is_some_and(|r| r.root == view.rows[i].repo.root)
+                }
+                Err(err) => errors.push(err),
+            }
+        }
+        view.marked.fill(false);
+        view.keep_selection_visible();
+        let fixed = todo.len() - errors.len();
+        let noun = |n: usize| if n == 1 { "repository" } else { "repositories" };
+        self.status = Some(match errors.first() {
+            None => format!("Fixed {fixed} {}", noun(fixed)),
+            Some(first) => {
+                let more = match errors.len() {
+                    1 => String::new(),
+                    n => format!(" (and {} more)", n - 1),
+                };
+                format!(
+                    "Fixed {fixed} of {} {}; {first}{more}",
+                    todo.len(),
+                    noun(todo.len())
+                )
+            }
+        });
+        if current {
             self.refresh();
         }
     }
@@ -1249,5 +1366,97 @@ mod tests {
             Some("ada@acme.example")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scan_view_fixes_only_the_marked_repos() {
+        let base = std::env::temp_dir().join(format!("gitenv-app-bulk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for (name, remote) in [
+            ("api", "git@github.com:acme/api.git"),
+            ("toy", "git@github.com:ada/toy.git"),
+            ("web", "git@github.com:acme/web.git"),
+        ] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            fix_git(&dir, &["init", "-q"]);
+            fix_git(&dir, &["remote", "add", "origin", remote]);
+            fix_git(&dir, &["config", "--local", "user.name", "Ada"]);
+            fix_git(
+                &dir,
+                &["config", "--local", "user.email", "ada@example.com"],
+            );
+        }
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        acme.remotes = vec!["github.com/acme/*".into()];
+        let mut app = app_with("bulk", vec![profile("personal"), acme]);
+        app.scan_root = base.clone();
+        let view = |app: &App| match &app.mode {
+            Mode::Scan(view) => view.clone(),
+            _ => panic!("not scanning: {:?}", app.status),
+        };
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Nothing is marked")
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(view(&app).to_fix(), [0, 2]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .contains("already on the right profile")
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        assert_eq!(view(&app).to_fix(), [0]);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('w')));
+        assert_eq!(view(&app).visible(), [0, 2]);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.status.as_deref(), Some("Nothing was changed"));
+        assert_eq!(
+            fix_git(&base.join("api"), &["config", "user.email"]),
+            "ada@example.com"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('F')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        assert_eq!(app.status.as_deref(), Some("Fixed 1 repository"));
+        assert_eq!(
+            fix_git(&base.join("api"), &["config", "user.email"]),
+            "ada@acme.example"
+        );
+        assert_eq!(
+            fix_git(&base.join("web"), &["config", "user.email"]),
+            "ada@example.com"
+        );
+        let after = view(&app);
+        assert_eq!(after.rows[0].status_word(), "fixed");
+        assert!(after.to_fix().is_empty());
+        assert_eq!(
+            after.visible(),
+            [2],
+            "the fixed repo leaves the problems-only list"
+        );
+        assert_eq!(
+            after.selected, 2,
+            "the highlight moves to a row still shown"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('r')));
+        assert_eq!(view(&app).to_fix(), [2], "marks survive a rescan");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

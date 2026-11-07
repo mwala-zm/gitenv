@@ -4,9 +4,9 @@ expression: draw(&app)
 ---
 " gitenv  right identity, right repo                                                             "
 "┌ Repositories under /home/ada/work: 1 of 3 on the right profile ──────────────────────────────┐"
-"│  wrong personal -> acme  acme/api                                                            │"
-"│> ok    acme              acme/web                                                            │"
-"│  none  ?                 scratch                                                             │"
+"│  [ ] wrong personal -> acme  acme/api                                                        │"
+"│>     ok    acme              acme/web                                                        │"
+"│      none  ?                 scratch                                                         │"
 "│                                                                                              │"
 "│                                                                                              │"
 "│                                                                                              │"
@@ -27,4 +27,4 @@ expression: draw(&app)
 "│                                                                                              │"
 "│                                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────────────────────┘"
-" ↑↓/jk select   Enter apply the rule's profile   o open   r rescan   Esc back   q quit          "
+" space mark   a all   F fix marked   Enter fix one   o open   w problems   / filter   Esc back  "
