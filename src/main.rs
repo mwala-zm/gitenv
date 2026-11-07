@@ -14,6 +14,7 @@ mod profile;
 mod report;
 mod rules;
 mod scan;
+mod theme;
 mod ui;
 mod watch;
 

@@ -13,6 +13,11 @@ use crate::rules;
 use crate::scan;
 
 pub fn render(frame: &mut Frame, app: &App) {
+    draw(frame, app);
+    app.theme.paint(frame.buffer_mut());
+}
+
+fn draw(frame: &mut Frame, app: &App) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -814,6 +819,7 @@ mod tests {
             pending: None,
             profile_filter: Default::default(),
             watch: Default::default(),
+            theme: Default::default(),
         }
     }
 

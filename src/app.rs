@@ -12,6 +12,7 @@ use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
 use crate::rules::{self, Reason};
 use crate::scan::{self, Row};
+use crate::theme::Theme;
 use crate::watch::{self, Watch};
 
 #[derive(Debug, Clone)]
@@ -114,6 +115,7 @@ pub struct App {
     pub pending: Option<Pending>,
     pub profile_filter: Filter,
     pub watch: Watch,
+    pub theme: Theme,
 }
 
 impl App {
@@ -167,6 +169,7 @@ impl App {
             pending: None,
             profile_filter: Filter::default(),
             watch: Watch::default(),
+            theme: Theme::from_env(),
         };
         app.select_active();
         if started_outside {
@@ -780,6 +783,7 @@ mod tests {
             pending: None,
             profile_filter: Filter::default(),
             watch: Watch::default(),
+            theme: Theme::default(),
         }
     }
 

@@ -116,6 +116,12 @@ When a rule claims the repository, its profile is selected on start, so
 whatever else the profile sets into the repository's local config, which
 always wins over your global config, so nothing global changes.
 
+The colours suit a dark terminal. Set `GITENV_THEME=light` for a pale
+one, or `GITENV_THEME=none` for no colour at all, with the highlighted row
+shown reversed; [`NO_COLOR`](https://no-color.org) does the same as
+`none`. These are environment variables rather than settings in the
+profiles file, so a file shared with an older gitenv still loads.
+
 In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
 `Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
 (delete to start or end) and `Ctrl-W` (delete the word before the cursor)
