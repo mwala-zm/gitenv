@@ -176,13 +176,27 @@ pub fn all(config: &Config) -> Vec<Rule<'_>> {
 /// matching rule wins: a remote rule beats a path rule, then the one with the
 /// longer literal prefix, then the earlier one in the file.
 pub fn expected<'a>(config: &'a Config, repo: &Repo) -> Option<(&'a Profile, Reason)> {
-    let urls: Vec<String> = repo
-        .rule_remotes()
+    matching(config, repo)
+        .into_iter()
+        .next()
+        .map(|rule| (rule.profile, rule.reason))
+}
+
+/// Every rule that matches `repo`, the one that claims it first and the rest
+/// in the order they would take over.
+pub fn matching<'a>(config: &'a Config, repo: &Repo) -> Vec<Rule<'a>> {
+    let urls = remote_subjects(repo);
+    let root = repo.root.display().to_string();
+    candidates(config, &urls, Some(&root))
+}
+
+/// The remotes of `repo` as remote rules see them: `host/owner/repo`, lower
+/// case, after `insteadOf` rewrites, origin alone when there is one.
+pub fn remote_subjects(repo: &Repo) -> Vec<String> {
+    repo.rule_remotes()
         .into_iter()
         .map(normalize_remote)
-        .collect();
-    let root = repo.root.display().to_string();
-    claim(config, &urls, Some(&root))
+        .collect()
 }
 
 /// The profile whose remote rule claims `url`, for a repository that does not
@@ -197,7 +211,16 @@ fn claim<'a>(
     urls: &[String],
     root: Option<&str>,
 ) -> Option<(&'a Profile, Reason)> {
-    all(config)
+    candidates(config, urls, root)
+        .into_iter()
+        .next()
+        .map(|rule| (rule.profile, rule.reason))
+}
+
+/// The rules that match, most specific first; the sort is stable, so of two
+/// equally specific rules the earlier one in the file comes first.
+fn candidates<'a>(config: &'a Config, urls: &[String], root: Option<&str>) -> Vec<Rule<'a>> {
+    let mut found: Vec<Rule> = all(config)
         .into_iter()
         .filter(|rule| match rule.reason {
             Reason::Remote(_) => urls.iter().any(|url| matches(&rule.pattern, url)),
@@ -209,8 +232,9 @@ fn claim<'a>(
                         .is_some_and(|p| path_matches(p, root))
             }),
         })
-        .min_by_key(|rule| Reverse(rule.rank))
-        .map(|rule| (rule.profile, rule.reason))
+        .collect();
+    found.sort_by_key(|rule| Reverse(rule.rank));
+    found
 }
 
 pub fn literal_prefix(pattern: &str) -> &str {

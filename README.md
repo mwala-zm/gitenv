@@ -155,7 +155,11 @@ profiles file, so a file shared with an older gitenv still loads.
 The form checks each field as you type: a label turns red when its value
 would be refused or would not work, such as an ssh key path with no file
 or the `.pub` half of a key, and the line under the form says why for the
-field you are in. `Ctrl-O` picks a value instead of typing it: the ssh
+field you are in. In the remote and path rule fields it also
+previews the rules as you type them against the repositories next to this
+one: which they would claim, and which stay with another profile's rule
+that is more specific or comes earlier in the file. `Ctrl-O` picks a value
+instead of typing it: the ssh
 keys in `~/.ssh` that have a `.pub` beside them, gpg's secret keys (or the
 `.pub` keys with the ssh format), the signing formats, yes or no, and the
 accounts `gh auth status` knows.

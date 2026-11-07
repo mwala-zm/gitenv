@@ -172,6 +172,7 @@ pub struct App {
     pub doctor_rx: Option<Receiver<Vec<Finding>>>,
     pub ssh_probe: SshProbe,
     pub setup: Option<Setup>,
+    pub known_repos: Option<Vec<Repo>>,
 }
 
 impl App {
@@ -230,6 +231,7 @@ impl App {
             doctor_rx: None,
             ssh_probe: doctor::ssh_probe,
             setup: None,
+            known_repos: None,
         };
         app.check_health();
         app.check_setup();
@@ -263,6 +265,7 @@ impl App {
             doctor_rx: None,
             ssh_probe: |_, _| Err("no network in tests".into()),
             setup: None,
+            known_repos: None,
         }
     }
 
@@ -461,8 +464,14 @@ impl App {
                     form.open_picker(items);
                 }
             }
-            (KeyCode::Tab, _) | (KeyCode::Down, _) => form.next_field(),
-            (KeyCode::BackTab, _) | (KeyCode::Up, _) => form.prev_field(),
+            (KeyCode::Tab, _) | (KeyCode::Down, _) => {
+                form.next_field();
+                self.load_known_repos();
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Up, _) => {
+                form.prev_field();
+                self.load_known_repos();
+            }
             (KeyCode::Backspace, _) => form.backspace(),
             (KeyCode::Delete, _) => form.delete(),
             (KeyCode::Left, _) => form.left(),
@@ -1063,6 +1072,29 @@ impl App {
             },
         });
         self.check_setup();
+    }
+
+    /// Finds the repositories next to this one once, the first time the
+    /// form reaches a rule field, so the rule preview has something to show.
+    fn load_known_repos(&mut self) {
+        let Mode::Edit(form) = &self.mode else {
+            return;
+        };
+        if self.known_repos.is_some()
+            || !matches!(form.field, crate::form::REMOTES | crate::form::PATHS)
+        {
+            return;
+        }
+        let mut repos: Vec<Repo> = self
+            .scan_rows(&self.scan_root.clone())
+            .map(|rows| rows.into_iter().map(|r| r.repo).collect())
+            .unwrap_or_default();
+        if let Some(here) = &self.repo
+            && !repos.iter().any(|r| r.root == here.root)
+        {
+            repos.push(here.clone());
+        }
+        self.known_repos = Some(repos);
     }
 
     fn refresh_export(&self) -> String {

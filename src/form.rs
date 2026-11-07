@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::git::{self, Repo, git_bool};
-use crate::profile::{Profile, SigningFormat};
+use crate::profile::{Config, Profile, SigningFormat};
 use crate::rules;
 
 pub const LABELS: [&str; 11] = [
@@ -36,6 +36,16 @@ pub struct Form {
 pub struct Picker {
     pub items: Vec<(String, String)>,
     pub selected: usize,
+}
+
+/// What the rules being typed would do to the repositories gitenv knows of:
+/// those they would claim, and those a more specific rule of another
+/// profile, or an equally specific one earlier in the file, keeps, with that
+/// profile's name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preview {
+    pub claimed: Vec<PathBuf>,
+    pub lost: Vec<(PathBuf, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +214,49 @@ impl Form {
                 }),
             _ => None,
         }
+    }
+
+    /// The profile as typed so far, kept to the rules that parse, standing
+    /// in where it will be saved: over the profile being edited, or last.
+    /// Each of `repos` it matches is claimed, or lost to whichever rule of
+    /// another profile is more specific.
+    pub fn preview(&self, config: &Config, repos: &[Repo]) -> Preview {
+        let profile = Profile {
+            name: self.values[0].trim().to_string(),
+            remotes: list(&self.values[REMOTES])
+                .into_iter()
+                .filter(|r| rules::validate(std::slice::from_ref(r)).is_ok())
+                .collect(),
+            paths: split_paths(&self.values[PATHS])
+                .into_iter()
+                .filter(|p| !p.is_empty() && rules::validate_paths(std::slice::from_ref(p)).is_ok())
+                .collect(),
+            ..Default::default()
+        };
+        let mut config = config.clone();
+        let at = match self.editing {
+            Some(i) if i < config.profiles.len() => {
+                config.profiles[i] = profile;
+                i
+            }
+            _ => {
+                config.profiles.push(profile);
+                config.profiles.len() - 1
+            }
+        };
+        let ours = &config.profiles[at];
+        let mut preview = Preview::default();
+        for repo in repos {
+            let found = rules::matching(&config, repo);
+            match found.iter().position(|r| std::ptr::eq(r.profile, ours)) {
+                Some(0) => preview.claimed.push(repo.root.clone()),
+                Some(_) => preview
+                    .lost
+                    .push((repo.root.clone(), found[0].profile.name.clone())),
+                None => {}
+            }
+        }
+        preview
     }
 
     /// Whether Ctrl-O lists values for the focused field.
@@ -944,5 +997,53 @@ mod tests {
         assert!(form.picker.is_none());
         form.field = 0;
         assert!(!form.pickable());
+    }
+
+    #[test]
+    fn the_preview_shows_what_the_typed_rules_would_claim_and_lose() {
+        let infra = Profile {
+            name: "infra".into(),
+            remotes: vec!["github.com/acme/infra*".into()],
+            ..Default::default()
+        };
+        let config = Config {
+            profiles: vec![infra],
+        };
+        let repos: Vec<Repo> = ["api", "web", "infra-tools"]
+            .iter()
+            .map(|name| {
+                let mut r = repo(
+                    &format!("/work/acme/{name}"),
+                    Some(&format!("git@github.com:acme/{name}.git")),
+                );
+                r.effective = Default::default();
+                r
+            })
+            .chain([repo("/work/toy", Some("git@github.com:ada/toy.git"))])
+            .collect();
+        let mut form = Form::new();
+        form.values[0] = "acme".into();
+        form.values[REMOTES] = "github.com/acme/*, github.com/[broken".into();
+        let p = form.preview(&config, &repos);
+        assert_eq!(
+            p.claimed,
+            [
+                PathBuf::from("/work/acme/api"),
+                PathBuf::from("/work/acme/web")
+            ]
+        );
+        assert_eq!(
+            p.lost,
+            [(PathBuf::from("/work/acme/infra-tools"), "infra".to_string())]
+        );
+
+        let mut edit = Form::edit(0, &config.profiles[0]);
+        edit.values[REMOTES] = "github.com/ada/*".into();
+        let p = edit.preview(&config, &repos);
+        assert_eq!(p.claimed, [PathBuf::from("/work/toy")]);
+        assert!(
+            p.lost.is_empty(),
+            "editing replaces the profile's own old rules"
+        );
     }
 }

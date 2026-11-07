@@ -102,7 +102,7 @@ fn draw(frame: &mut Frame, app: &App) {
     match &app.mode {
         Mode::Normal => {}
         Mode::Help => render_help(frame),
-        Mode::Edit(form) => render_form(frame, form),
+        Mode::Edit(form) => render_form(frame, form, app),
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
         Mode::Doctor(view) => render_doctor(frame, view),
         Mode::ConfirmSetup(action) => render_confirm_setup(frame, *action, app),
@@ -516,7 +516,7 @@ fn render_confirm_delete(frame: &mut Frame, app: &App) {
     );
 }
 
-fn render_form(frame: &mut Frame, form: &Form) {
+fn render_form(frame: &mut Frame, form: &Form, app: &App) {
     let label_width = LABEL_WIDTH;
     let width = 78.min(frame.area().width);
     let text_width = (width as usize).saturating_sub(2);
@@ -538,6 +538,11 @@ fn render_form(frame: &mut Frame, form: &Form) {
                 .map(|l| Line::from(l.green())),
         ),
         (None, None) => {}
+    }
+    if matches!(form.field, crate::form::REMOTES | crate::form::PATHS)
+        && let Some(repos) = &app.known_repos
+    {
+        notes.extend(preview_lines(form, app, repos, text_width));
     }
     let pick = if form.pickable() {
         "   Ctrl-O pick"
@@ -591,6 +596,72 @@ fn render_form(frame: &mut Frame, form: &Form) {
     if x < area.right() {
         frame.set_cursor_position((x, y));
     }
+}
+
+/// Which of the repositories next to this one the rules being typed would
+/// claim, and which stay with a more specific or earlier rule of another
+/// profile.
+fn preview_lines(
+    form: &Form,
+    app: &App,
+    repos: &[crate::git::Repo],
+    width: usize,
+) -> Vec<Line<'static>> {
+    let preview = form.preview(&app.config, repos);
+    let shown = |path: &std::path::Path| match path.strip_prefix(&app.scan_root) {
+        Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+        _ => scan::tildify(path),
+    };
+    let listed = |lead: String, names: Vec<String>| {
+        let mut text = lead;
+        for (i, name) in names.iter().enumerate() {
+            let more = format!(" +{} more", names.len() - i);
+            let piece = if i == 0 {
+                format!(" {name}")
+            } else {
+                format!(", {name}")
+            };
+            if text.chars().count() + piece.chars().count() + more.len() > width {
+                text.push_str(&more);
+                break;
+            }
+            text.push_str(&piece);
+        }
+        text
+    };
+    let mut lines = Vec::new();
+    if preview.claimed.is_empty() && preview.lost.is_empty() {
+        lines.push(Line::from(
+            format!(
+                "none of the {} nearby repositories matches these rules",
+                repos.len()
+            )
+            .dim(),
+        ));
+        return lines;
+    }
+    if !preview.claimed.is_empty() {
+        let names = preview.claimed.iter().map(|p| shown(p)).collect();
+        let lead = format!(
+            "✔ claims {} of {} nearby repos:",
+            preview.claimed.len(),
+            repos.len()
+        );
+        lines.push(Line::from(listed(lead, names).green()));
+    }
+    if !preview.lost.is_empty() {
+        let names = preview
+            .lost
+            .iter()
+            .map(|(p, by)| format!("{} ({by})", shown(p)))
+            .collect();
+        let lead = format!(
+            "! {} stay with a stronger or earlier rule:",
+            preview.lost.len()
+        );
+        lines.push(Line::from(listed(lead, names).yellow()));
+    }
+    lines
 }
 
 /// The values to pick from, just below the field, over the rest of the form.
@@ -1366,6 +1437,30 @@ mod tests {
         form.open_picker(form.candidates(std::path::Path::new("/nonexistent")));
         app.mode = Mode::Edit(Box::new(form));
         insta::assert_snapshot!("form_picker", draw(&app));
+    }
+
+    #[test]
+    fn form_previews_what_the_rules_claim() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut infra = Profile {
+            name: "infra".into(),
+            user_name: "Ada".into(),
+            email: "ada@acme.example".into(),
+            ..Default::default()
+        };
+        infra.remotes = vec!["github.com/acme/infra".into()];
+        app.config.profiles.push(infra);
+        let repo_at = |name: &str| Repo {
+            root: format!("/home/ada/work/acme/{name}").into(),
+            remote: Some(format!("git@github.com:acme/{name}.git")),
+            ..repo()
+        };
+        app.known_repos = Some(vec![repo_at("api"), repo_at("web"), repo_at("infra")]);
+        let mut form = Form::edit(1, &app.config.profiles[1]);
+        form.field = crate::form::REMOTES;
+        form.cursor = form.values[form.field].chars().count();
+        app.mode = Mode::Edit(Box::new(form));
+        insta::assert_snapshot!(draw(&app));
     }
 
     #[test]
