@@ -116,6 +116,13 @@ When a rule claims the repository, its profile is selected on start, so
 whatever else the profile sets into the repository's local config, which
 always wins over your global config, so nothing global changes.
 
+The mouse works too: the wheel moves through the list, a click highlights
+a profile or repository, and in the fix-authors view a click ticks or
+unticks a commit. Popups other than help ignore it, so a stray click never
+confirms anything. While gitenv has the mouse, most terminals still select
+text with `Shift` (`Option` in iTerm2) held down; set `GITENV_MOUSE=0` to
+leave the mouse to the terminal.
+
 The colours suit a dark terminal. Set `GITENV_THEME=light` for a pale
 one, or `GITENV_THEME=none` for no colour at all, with the highlighted row
 shown reversed; [`NO_COLOR`](https://no-color.org) does the same as

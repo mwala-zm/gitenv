@@ -17,13 +17,62 @@ pub fn render(frame: &mut Frame, app: &App) {
     app.theme.paint(frame.buffer_mut());
 }
 
-fn draw(frame: &mut Frame, app: &App) {
+/// Where each part of the screen goes, shared by drawing and by the mouse
+/// so a click lands on what was drawn there.
+pub struct Areas {
+    pub header: Rect,
+    pub body: Rect,
+    pub footer: Rect,
+    pub left: Rect,
+    pub right: Rect,
+}
+
+pub fn areas(screen: Rect) -> Areas {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
+    .areas(screen);
+    let [left, right] =
+        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(body);
+    Areas {
+        header,
+        body,
+        footer,
+        left,
+        right,
+    }
+}
+
+/// The fix-authors view's heading, commit list and summary line.
+pub fn fix_parts(body: Rect) -> [Rect; 3] {
+    Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(Block::bordered().inner(body))
+}
+
+/// Which entry of a list drawn in `inner` row `y` shows. A list redrawn each
+/// frame scrolls only as far as it must to show the `selected` entry last.
+pub fn list_row(inner: Rect, selected: Option<usize>, y: u16) -> Option<usize> {
+    if y < inner.y || y >= inner.y + inner.height {
+        return None;
+    }
+    let offset = selected.map_or(0, |s| (s + 1).saturating_sub(inner.height as usize));
+    Some(offset + (y - inner.y) as usize)
+}
+
+fn draw(frame: &mut Frame, app: &App) {
+    let Areas {
+        header,
+        body,
+        footer,
+        left,
+        right,
+    } = areas(frame.area());
 
     render_header(frame, header);
     if let Mode::Scan(view) = &app.mode {
@@ -39,9 +88,6 @@ fn draw(frame: &mut Frame, app: &App) {
         }
         return;
     }
-
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(body);
 
     render_profiles(frame, left, app);
     render_repo(frame, right, app);
@@ -155,12 +201,7 @@ fn render_fix_authors(frame: &mut Frame, area: Rect, app: &App, view: &FixView) 
         .max()
         .unwrap_or(0);
 
-    let [head, list_area, summary] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(Block::bordered().inner(area));
+    let [head, list_area, summary] = fix_parts(area);
     frame.render_widget(Block::bordered().title(title), area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![

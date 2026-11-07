@@ -10,6 +10,7 @@ mod form;
 mod gh;
 mod git;
 mod hook;
+mod mouse;
 mod profile;
 mod report;
 mod rules;
@@ -27,7 +28,11 @@ use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::Rect;
 
 use crate::app::App;
 
@@ -292,7 +297,10 @@ fn main() -> Result<ExitCode> {
             let dir = resolve_dir(cli.path)?;
             let mut app = App::new(&dir)?;
             let mut terminal = ratatui::init();
-            let result = run(&mut terminal, &mut app);
+            let mouse = mouse::enabled();
+            capture_mouse(mouse, true);
+            let result = run(&mut terminal, &mut app, mouse);
+            capture_mouse(mouse, false);
             ratatui::restore();
             result.map(|()| ExitCode::SUCCESS)
         }
@@ -325,26 +333,45 @@ fn resolve_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
 /// runs between frames, with the terminal handed back first when it may ask
 /// for a passphrase, since pinentry and ssh cannot prompt while the UI holds
 /// the screen in raw mode.
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
+fn run(terminal: &mut DefaultTerminal, app: &mut App, mouse: bool) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::render(frame, app))?;
-        if event::poll(Duration::from_millis(500))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
+        if event::poll(Duration::from_millis(500))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+                Event::Mouse(event) => {
+                    let size = terminal.size()?;
+                    mouse::handle(app, event, Rect::new(0, 0, size.width, size.height));
+                }
+                _ => {}
+            }
         }
         app.tick();
         if app.pending.is_some() {
             if app.pending_needs_terminal() {
+                capture_mouse(mouse, false);
                 ratatui::restore();
                 println!("gitenv: rewriting commits; sign them if asked");
                 app.run_pending();
                 *terminal = ratatui::init();
+                capture_mouse(mouse, true);
             } else {
                 app.run_pending();
             }
         }
     }
     Ok(())
+}
+
+/// Turns the terminal's mouse reporting on or off when the mouse is
+/// enabled. A terminal that cannot report it is left as it is.
+fn capture_mouse(enabled: bool, on: bool) {
+    if !enabled {
+        return;
+    }
+    let _ = if on {
+        execute!(io::stdout(), EnableMouseCapture)
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)
+    };
 }
