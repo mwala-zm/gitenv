@@ -5,6 +5,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cmd;
 use crate::export;
+use crate::filter::{self, Filter};
 use crate::fix;
 use crate::form::Form;
 use crate::git::{self, Repo};
@@ -69,6 +70,34 @@ pub struct ScanView {
     pub root: PathBuf,
     pub rows: Vec<Row>,
     pub selected: usize,
+    pub filter: Filter,
+}
+
+impl ScanView {
+    /// The rows the filter lets through, matched on the path shown and the
+    /// profile column.
+    pub fn visible(&self) -> Vec<usize> {
+        (0..self.rows.len())
+            .filter(|&i| {
+                let row = &self.rows[i];
+                self.filter.matches(&format!(
+                    "{} {}",
+                    scan::tildify(&row.repo.root),
+                    row.profile_column()
+                ))
+            })
+            .collect()
+    }
+
+    pub fn current(&self) -> Option<&Row> {
+        self.visible()
+            .contains(&self.selected)
+            .then(|| &self.rows[self.selected])
+    }
+
+    fn keep_selection_visible(&mut self) {
+        self.selected = filter::step(&self.visible(), self.selected, 0);
+    }
 }
 
 pub struct App {
@@ -82,6 +111,7 @@ pub struct App {
     pub scan_root: PathBuf,
     pub config_text: Option<String>,
     pub pending: Option<Pending>,
+    pub profile_filter: Filter,
 }
 
 impl App {
@@ -133,6 +163,7 @@ impl App {
             scan_root,
             config_text,
             pending: None,
+            profile_filter: Filter::default(),
         };
         app.select_active();
         if started_outside {
@@ -160,8 +191,36 @@ impl App {
         }
     }
 
+    /// The highlighted profile, or none when the filter hides it, so a key
+    /// never acts on a profile that is not on screen.
     pub fn selected_profile(&self) -> Option<&Profile> {
-        self.config.profiles.get(self.selected)
+        let profile = self.config.profiles.get(self.selected)?;
+        self.profile_matches(profile).then_some(profile)
+    }
+
+    fn profile_matches(&self, p: &Profile) -> bool {
+        self.profile_filter
+            .matches(&format!("{} {} {}", p.name, p.user_name, p.email))
+    }
+
+    pub fn visible_profiles(&self) -> Vec<usize> {
+        (0..self.config.profiles.len())
+            .filter(|&i| self.profile_matches(&self.config.profiles[i]))
+            .collect()
+    }
+
+    fn keep_selection_visible(&mut self) {
+        self.selected = filter::step(&self.visible_profiles(), self.selected, 0);
+    }
+
+    /// Highlights profile `idx`, clearing the filter if it would hide it.
+    fn select(&mut self, idx: usize) {
+        self.selected = idx;
+        if let Some(p) = self.config.profiles.get(idx)
+            && !self.profile_matches(p)
+        {
+            self.profile_filter.clear();
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
@@ -182,7 +241,15 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) {
+        if self.profile_filter.handle_key(key) {
+            self.keep_selection_visible();
+            return;
+        }
         match (key.code, key.modifiers) {
+            (KeyCode::Char('/'), _) => self.profile_filter.start(),
+            (KeyCode::Esc, _) if self.profile_filter.is_active() => {
+                self.profile_filter.clear();
+            }
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => self.move_selection(1),
@@ -298,6 +365,7 @@ impl App {
                 self.selected = self
                     .selected
                     .min(self.config.profiles.len().saturating_sub(1));
+                self.keep_selection_visible();
             }
             Err(err) => self.status = Some(format!("Could not read config: {err:#}")),
         }
@@ -325,7 +393,7 @@ impl App {
             }
         }
         self.save_config(config)?;
-        self.selected = selected;
+        self.select(selected);
         self.status = Some(format!("Saved profile '{name}'{}", self.refresh_export()));
         Ok(())
     }
@@ -341,6 +409,7 @@ impl App {
                 self.selected = self
                     .selected
                     .min(self.config.profiles.len().saturating_sub(1));
+                self.keep_selection_visible();
                 format!(
                     "Deleted profile '{}'{}",
                     removed.name,
@@ -370,6 +439,7 @@ impl App {
                     root,
                     rows,
                     selected: 0,
+                    filter: Filter::default(),
                 }))
             }
             Err(err) => self.status = Some(format!("Could not scan: {err}")),
@@ -387,6 +457,7 @@ impl App {
                 Ok(rows) => {
                     view.selected = view.selected.min(rows.len().saturating_sub(1));
                     view.rows = rows;
+                    view.keep_selection_visible();
                 }
                 Err(err) => self.status = Some(format!("Could not scan: {err}")),
             }
@@ -397,21 +468,26 @@ impl App {
         let Mode::Scan(view) = &mut self.mode else {
             return;
         };
-        let len = view.rows.len().max(1);
+        if view.filter.handle_key(key) {
+            view.keep_selection_visible();
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true
             }
+            (KeyCode::Char('/'), _) => view.filter.start(),
+            (KeyCode::Esc, _) if view.filter.is_active() => view.filter.clear(),
             (KeyCode::Esc, _) | (KeyCode::Char('s'), _) => self.mode = Mode::Normal,
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                view.selected = (view.selected + 1) % len
+                view.selected = filter::step(&view.visible(), view.selected, 1)
             }
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                view.selected = (view.selected + len - 1) % len
+                view.selected = filter::step(&view.visible(), view.selected, -1)
             }
             (KeyCode::Char('r'), _) => self.rescan(),
             (KeyCode::Char('o'), _) => {
-                let Some(row) = view.rows.get(view.selected) else {
+                let Some(row) = view.current() else {
                     return;
                 };
                 let root = row.repo.root.clone();
@@ -426,7 +502,7 @@ impl App {
                 }
             }
             (KeyCode::Enter, _) => {
-                let Some(row) = view.rows.get(view.selected) else {
+                let Some(row) = view.current() else {
                     return;
                 };
                 let repo = row.repo.clone();
@@ -594,12 +670,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let len = self.config.profiles.len();
-        if len == 0 {
-            return;
-        }
-        let next = (self.selected as isize + delta).rem_euclid(len as isize);
-        self.selected = next as usize;
+        self.selected = filter::step(&self.visible_profiles(), self.selected, delta);
     }
 
     fn apply_selected(&mut self) {
@@ -640,7 +711,7 @@ impl App {
         if let Some(target) = target
             && let Some(idx) = self.config.profiles.iter().position(|p| p == target)
         {
-            self.selected = idx;
+            self.select(idx);
         }
     }
 }
@@ -662,6 +733,7 @@ mod tests {
             scan_root: std::env::temp_dir(),
             config_text: None,
             pending: None,
+            profile_filter: Filter::default(),
         }
     }
 
@@ -802,6 +874,24 @@ mod tests {
         };
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0].status_word(), "wrong");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        type_keys(&mut app, "toy");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Mode::Scan(view) = &app.mode else {
+            panic!("still scanning");
+        };
+        assert_eq!(view.visible(), [1]);
+        assert_eq!(
+            view.current().unwrap().repo.root.file_name().unwrap(),
+            "toy"
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(
+            matches!(app.mode, Mode::Scan(_)),
+            "Esc clears the filter first"
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('k')));
 
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         let Mode::Scan(view) = &app.mode else {
@@ -1014,5 +1104,49 @@ mod tests {
         );
         assert_eq!(app.active_profile().unwrap().name, "acme");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn type_keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn filter_hides_profiles_and_keys_act_only_on_visible_ones() {
+        let mut app = app_with(
+            "filter",
+            vec![profile("personal"), profile("acme"), profile("acme-ops")],
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        type_keys(&mut app, "acm");
+        assert_eq!(app.visible_profiles(), [1, 2]);
+        assert_eq!(app.selected, 1);
+        type_keys(&mut app, "jk");
+        assert_eq!(app.profile_filter.query, "acmjk");
+        assert!(app.selected_profile().is_none());
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Backspace));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.selected, 2);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        assert_eq!(app.selected, 1);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(!app.should_quit);
+        assert_eq!(app.visible_profiles(), [0, 1, 2]);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn a_new_profile_the_filter_would_hide_clears_it() {
+        let mut app = app_with("filternew", vec![profile("acme")]);
+        app.profile_filter.query = "acme".into();
+        app.save_profile(None, profile("personal")).unwrap();
+        assert_eq!(app.selected, 1);
+        assert!(!app.profile_filter.is_active());
+        std::fs::remove_file(&app.config_path).ok();
     }
 }

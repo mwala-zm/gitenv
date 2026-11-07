@@ -4,6 +4,7 @@ mod clone;
 mod cmd;
 mod doctor;
 mod export;
+mod filter;
 mod fix;
 mod form;
 mod gh;

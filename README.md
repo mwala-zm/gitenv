@@ -107,6 +107,7 @@ someone else.
 | `r` | re-read the repo and the profiles file |
 | `s` | list every repository next to this one |
 | `f` | re-author unpushed commits made as someone else |
+| `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 
@@ -134,6 +135,11 @@ git is mid-rebase or the commits include a merge, the view says so instead.
 In the repository list (`s`), `Enter` applies the profile a rule claims for
 the highlighted repository, `o` opens it in the main view, `r` rescans and
 `Esc` goes back.
+
+`/` filters the profiles or the repository list as you type. Each letter
+has to start a word or follow the one before, so `acm` finds `acme` and
+`aapi` finds `acme/api`; spaces only separate words. Profiles match on
+their name, user name and email, repositories on their path and profile.
 
 ## Profiles
 

@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, FixView, Mode, ScanView};
+use crate::filter::Filter;
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
 use crate::rules;
@@ -50,13 +51,25 @@ pub fn render(frame: &mut Frame, app: &App) {
     }
 }
 
+/// ` /query ` for a list's title while a filter is set, with a cursor
+/// while it is being typed.
+fn filter_title(filter: &Filter) -> String {
+    match (filter.typing, filter.query.is_empty()) {
+        (true, _) => format!(" /{}█ ", filter.query),
+        (false, false) => format!(" /{} ", filter.query),
+        (false, true) => String::new(),
+    }
+}
+
 fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
     let ok = view.rows.iter().filter(|r| r.is_ok()).count();
     let title = format!(
-        " Repositories under {}: {ok} of {} on the right profile ",
+        " Repositories under {}: {ok} of {} on the right profile {}",
         scan::tildify(&view.root),
-        view.rows.len()
+        view.rows.len(),
+        filter_title(&view.filter)
     );
+    let visible = view.visible();
     let width = view
         .rows
         .iter()
@@ -64,9 +77,9 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
         .max()
         .unwrap_or(0)
         .max("PROFILE".len());
-    let items: Vec<ListItem> = view
-        .rows
+    let mut items: Vec<ListItem> = visible
         .iter()
+        .map(|&i| &view.rows[i])
         .map(|row| {
             let word = row.status_word();
             let colour = match word {
@@ -87,6 +100,11 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
             ]))
         })
         .collect();
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(
+            format!("No repository matches /{}", view.filter.query).dim(),
+        )));
+    }
     let list = List::new(items)
         .block(Block::bordered().title(title))
         .highlight_style(
@@ -96,7 +114,7 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
         )
         .highlight_symbol("> ");
     let mut state = ListState::default();
-    state.select(Some(view.selected));
+    state.select(visible.iter().position(|&i| i == view.selected));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -271,6 +289,7 @@ fn render_help(frame: &mut Frame) {
         ("d", "delete the selected profile"),
         ("r", "re-read the repo and the profiles file"),
         ("f", "re-author unpushed commits made as someone else"),
+        ("/", "filter the list; Enter keeps it, Esc clears it"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -469,10 +488,10 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
     let active = app.active_profile();
     let expected = app.expected_profile().map(|(p, _)| p);
 
-    let items: Vec<ListItem> = app
-        .config
-        .profiles
+    let visible = app.visible_profiles();
+    let mut items: Vec<ListItem> = visible
         .iter()
+        .map(|&i| &app.config.profiles[i])
         .map(|p| {
             let (marker, colour) = match (active == Some(p), expected == Some(p)) {
                 (true, _) => ("● ", Color::Green),
@@ -489,9 +508,14 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let block = Block::bordered().title(" Profiles ");
+    let block = Block::bordered().title(format!(" Profiles {}", filter_title(&app.profile_filter)));
     let inner = block.inner(area);
 
+    if items.is_empty() && app.profile_filter.is_active() {
+        items.push(ListItem::new(Line::from(
+            format!("No profile matches /{}", app.profile_filter.query).dim(),
+        )));
+    }
     if items.is_empty() {
         let hint = Paragraph::new(vec![
             Line::from("No profiles yet.".bold()),
@@ -522,7 +546,7 @@ fn render_profiles(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
-    state.select(Some(app.selected));
+    state.select(visible.iter().position(|&i| i == app.selected));
     frame.render_stateful_widget(list, area, &mut state);
     render_wordmark(frame, inner, used_rows);
 }
@@ -657,8 +681,23 @@ fn history_lines(repo: &Repo, reference: Option<&str>) -> Vec<Line<'static>> {
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let typing = match &app.mode {
+        Mode::Scan(view) => view.filter.typing,
+        Mode::Normal => app.profile_filter.typing,
+        _ => false,
+    };
     let line = match &app.status {
         Some(msg) => Line::from(msg.clone().cyan()),
+        None if typing => Line::from(vec![
+            " type ".bold(),
+            "to filter  ".dim(),
+            " ↑↓ ".bold(),
+            "select  ".dim(),
+            " Enter ".bold(),
+            "keep the filter  ".dim(),
+            " Esc ".bold(),
+            "clear it".dim(),
+        ]),
         None if matches!(app.mode, Mode::Scan(_)) => Line::from(vec![
             " ↑↓/jk ".bold(),
             "select  ".dim(),
@@ -773,6 +812,7 @@ mod tests {
             scan_root: "/home/ada/work".into(),
             config_text: None,
             pending: None,
+            profile_filter: Default::default(),
         }
     }
 
@@ -892,6 +932,14 @@ mod tests {
     }
 
     #[test]
+    fn filtered_profiles_while_typing() {
+        let mut app = app(profiles(), Some(repo()));
+        app.profile_filter.query = "acm".into();
+        app.profile_filter.typing = true;
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
     fn scan_view() {
         use crate::check::Verdict;
         use crate::rules::Reason;
@@ -929,6 +977,7 @@ mod tests {
                 ),
             ],
             selected: 1,
+            filter: Default::default(),
         }));
         insta::assert_snapshot!(draw(&app));
     }
