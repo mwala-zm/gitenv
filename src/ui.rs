@@ -9,7 +9,7 @@ use crate::app::{App, DoctorView, FixView, Mode, ScanView, Setup, SetupAction};
 use crate::doctor::Level;
 use crate::export::Includes;
 use crate::filter::Filter;
-use crate::form::{Form, LABEL_WIDTH, LABELS};
+use crate::form::{Check, Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
 use crate::hook::HookStatus;
 use crate::rules;
@@ -519,10 +519,34 @@ fn render_confirm_delete(frame: &mut Frame, app: &App) {
 fn render_form(frame: &mut Frame, form: &Form) {
     let label_width = LABEL_WIDTH;
     let width = 78.min(frame.area().width);
-    let notes = match &form.error {
-        Some(err) => wrap(err, (width as usize).saturating_sub(2)),
-        None => vec!["Tab/↓ next field   ←→ Home End move   Enter save   Esc cancel".to_string()],
+    let text_width = (width as usize).saturating_sub(2);
+    let mut notes: Vec<Line> = Vec::new();
+    match (&form.error, form.check(form.field)) {
+        (Some(err), _) => notes.extend(
+            wrap(err, text_width)
+                .into_iter()
+                .map(|l| Line::from(l.red())),
+        ),
+        (None, Some(Check::Bad(why))) => notes.extend(
+            wrap(&format!("✘ {why}"), text_width)
+                .into_iter()
+                .map(|l| Line::from(l.red())),
+        ),
+        (None, Some(Check::Good(what))) => notes.extend(
+            wrap(&format!("✔ {what}"), text_width)
+                .into_iter()
+                .map(|l| Line::from(l.green())),
+        ),
+        (None, None) => {}
+    }
+    let pick = if form.pickable() {
+        "   Ctrl-O pick"
+    } else {
+        ""
     };
+    notes.push(Line::from(
+        format!("Tab/↓ next   ←→ move   Enter save   Esc cancel{pick}").dim(),
+    ));
     let area = centered(
         frame.area(),
         width,
@@ -535,10 +559,11 @@ fn render_form(frame: &mut Frame, form: &Form) {
         .zip(form.values.iter())
         .enumerate()
         .map(|(i, (label, value))| {
-            let style = if i == form.field {
-                Style::new().bold().fg(Color::Cyan)
-            } else {
-                Style::new()
+            let bad = matches!(form.check(i), Some(Check::Bad(_)));
+            let style = match (i == form.field, bad) {
+                (_, true) => Style::new().bold().fg(Color::Red),
+                (true, false) => Style::new().bold().fg(Color::Cyan),
+                (false, false) => Style::new(),
             };
             let cursor = (i == form.field).then_some(form.cursor);
             Line::from(vec![
@@ -548,13 +573,7 @@ fn render_form(frame: &mut Frame, form: &Form) {
         })
         .collect();
     lines.push(Line::from(""));
-    for note in notes {
-        lines.push(if form.error.is_some() {
-            Line::from(note.red())
-        } else {
-            Line::from(note.dim())
-        });
-    }
+    lines.extend(notes);
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -562,12 +581,44 @@ fn render_form(frame: &mut Frame, form: &Form) {
         area,
     );
 
+    let y = area.y + 1 + form.field as u16;
+    if let Some(picker) = &form.picker {
+        render_picker(frame, picker, area, y);
+        return;
+    }
     let (_, column) = visible(&form.values[form.field], Some(form.cursor), value_width);
     let x = area.x + 1 + label_width as u16 + column as u16;
-    let y = area.y + 1 + form.field as u16;
     if x < area.right() {
         frame.set_cursor_position((x, y));
     }
+}
+
+/// The values to pick from, just below the field, over the rest of the form.
+fn render_picker(frame: &mut Frame, picker: &crate::form::Picker, form: Rect, row: u16) {
+    const SHOWN: usize = 8;
+    let height = picker.items.len().min(SHOWN) as u16 + 2;
+    let x = form.x + 1 + LABEL_WIDTH as u16 - 1;
+    let width = form.right().saturating_sub(x + 1);
+    let screen = frame.area();
+    let y = (row + 1).min(screen.bottom().saturating_sub(height));
+    let area = Rect::new(x, y, width, height).intersection(screen);
+    let items: Vec<ListItem> = picker
+        .items
+        .iter()
+        .map(|(_, label)| ListItem::new(label.clone()))
+        .collect();
+    let list = List::new(items)
+        .block(Block::bordered().title(" ↑↓ choose · Enter pick · Esc close "))
+        .highlight_style(
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(Some(picker.selected));
+    frame.render_widget(Clear, area);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn wrap(text: &str, width: usize) -> Vec<String> {
@@ -1300,6 +1351,21 @@ mod tests {
         insta::assert_snapshot!("setup_section", draw(&app));
         app.mode = Mode::ConfirmSetup(SetupAction::Includes);
         insta::assert_snapshot!("setup_popup", draw(&app));
+    }
+
+    #[test]
+    fn form_flags_bad_fields_and_shows_a_picker() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut form = Form::edit(1, &profiles()[1]);
+        form.values[crate::form::SSH_KEY] = "/nonexistent/id_acme".into();
+        form.field = crate::form::SSH_KEY;
+        form.cursor = form.values[form.field].chars().count();
+        app.mode = Mode::Edit(Box::new(form.clone()));
+        insta::assert_snapshot!("form_checks", draw(&app));
+        form.field = crate::form::SIGNING_FORMAT;
+        form.open_picker(form.candidates(std::path::Path::new("/nonexistent")));
+        app.mode = Mode::Edit(Box::new(form));
+        insta::assert_snapshot!("form_picker", draw(&app));
     }
 
     #[test]

@@ -152,6 +152,14 @@ shown reversed; [`NO_COLOR`](https://no-color.org) does the same as
 `none`. These are environment variables rather than settings in the
 profiles file, so a file shared with an older gitenv still loads.
 
+The form checks each field as you type: a label turns red when its value
+would be refused or would not work, such as an ssh key path with no file
+or the `.pub` half of a key, and the line under the form says why for the
+field you are in. `Ctrl-O` picks a value instead of typing it: the ssh
+keys in `~/.ssh` that have a `.pub` beside them, gpg's secret keys (or the
+`.pub` keys with the ssh format), the signing formats, yes or no, and the
+accounts `gh auth status` knows.
+
 In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
 `Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
 (delete to start or end) and `Ctrl-W` (delete the word before the cursor)

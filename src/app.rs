@@ -431,9 +431,35 @@ impl App {
         let Mode::Edit(form) = &mut self.mode else {
             return;
         };
+        if form.picker.is_some() {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => form.move_picker(1),
+                KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => form.move_picker(-1),
+                KeyCode::Enter => form.pick(),
+                _ => form.picker = None,
+            }
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 self.mode = Mode::Normal;
+            }
+            (KeyCode::Char('o'), KeyModifiers::CONTROL) if form.pickable() => {
+                let ssh_dir = directories::UserDirs::new()
+                    .map(|d| d.home_dir().join(".ssh"))
+                    .unwrap_or_default();
+                let items = form.candidates(&ssh_dir);
+                if items.is_empty() {
+                    form.error = Some(match form.field {
+                        crate::form::SSH_KEY => "No keys with a .pub next to them in ~/.ssh".into(),
+                        crate::form::GH_ACCOUNT => {
+                            "gh knows no accounts; log in with `gh auth login`".into()
+                        }
+                        _ => "Nothing to pick from".into(),
+                    });
+                } else {
+                    form.open_picker(items);
+                }
             }
             (KeyCode::Tab, _) | (KeyCode::Down, _) => form.next_field(),
             (KeyCode::BackTab, _) | (KeyCode::Up, _) => form.prev_field(),
@@ -1774,5 +1800,33 @@ mod tests {
         assert_eq!(app.active_profile().unwrap().name, "client");
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_file(&app.config_path).ok();
+    }
+
+    #[test]
+    fn ctrl_o_picks_a_value_and_esc_only_closes_the_picker() {
+        let mut app = app_with("picker", vec![]);
+        app.mode = Mode::Edit(Box::new(Form::new()));
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        app.handle_key(ctrl_o);
+        let Mode::Edit(form) = &app.mode else {
+            panic!()
+        };
+        assert!(form.picker.is_none(), "the name field has nothing to pick");
+        for _ in 0..crate::form::SIGNING_FORMAT {
+            app.handle_key(KeyEvent::from(KeyCode::Tab));
+        }
+        app.handle_key(ctrl_o);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("Esc in the picker left the form");
+        };
+        assert!(form.picker.is_none());
+        app.handle_key(ctrl_o);
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("Enter in the picker saved the form");
+        };
+        assert_eq!(form.values[crate::form::SIGNING_FORMAT], "ssh");
     }
 }

@@ -28,7 +28,29 @@ pub struct Form {
     pub cursor: usize,
     pub editing: Option<usize>,
     pub error: Option<String>,
+    pub picker: Option<Picker>,
 }
+
+/// Values to choose from for one field: what goes in, and what is shown.
+#[derive(Debug, Clone, Default)]
+pub struct Picker {
+    pub items: Vec<(String, String)>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    Good(String),
+    Bad(String),
+}
+
+pub const SIGNING_KEY: usize = 3;
+pub const SIGNING_FORMAT: usize = 4;
+pub const SIGN_COMMITS: usize = 5;
+pub const SSH_KEY: usize = 6;
+pub const GH_ACCOUNT: usize = 7;
+pub const REMOTES: usize = 8;
+pub const PATHS: usize = 9;
 
 impl Form {
     pub fn new() -> Self {
@@ -69,6 +91,7 @@ impl Form {
             cursor: profile.name.chars().count(),
             editing: Some(index),
             error: None,
+            picker: None,
         }
     }
 
@@ -123,6 +146,111 @@ impl Form {
             cursor: values[0].chars().count(),
             values,
             ..Self::default()
+        }
+    }
+
+    fn format(&self) -> Option<SigningFormat> {
+        SigningFormat::parse(self.values[SIGNING_FORMAT].trim())
+    }
+
+    /// What can be said about field `field` as typed so far: a key file that
+    /// is missing or public, a value the field does not take, a rule that
+    /// does not parse. Saving reports the same, but this shows it at once.
+    pub fn check(&self, field: usize) -> Option<Check> {
+        let value = self.values[field].trim();
+        let bad = |s: &str| Some(Check::Bad(s.to_string()));
+        match field {
+            2 if !value.is_empty() && !value.contains('@') => bad("an email address needs an @"),
+            SIGNING_KEY if !value.is_empty() && self.format() == Some(SigningFormat::Ssh) => {
+                if value.starts_with("key::") || value.starts_with("ssh-") {
+                    Some(Check::Good("an inline ssh key".into()))
+                } else {
+                    key_file(value)
+                }
+            }
+            SIGNING_FORMAT if !value.is_empty() && self.format().is_none() => {
+                bad("gpg, ssh or x509")
+            }
+            SIGN_COMMITS if !value.is_empty() => match git_bool(value) {
+                None => bad("yes or no"),
+                Some(true) if self.values[SIGNING_KEY].trim().is_empty() => {
+                    bad("signing needs a signing key")
+                }
+                Some(_) => None,
+            },
+            SSH_KEY if !value.is_empty() => {
+                if value.ends_with(".pub") {
+                    return bad("that is the public key; give the private one");
+                }
+                key_file(value)
+            }
+            REMOTES | PATHS if !value.is_empty() => {
+                let checked = if field == REMOTES {
+                    rules::validate(&list(value))
+                } else {
+                    rules::validate_paths(&split_paths(value))
+                };
+                checked.err().map(Check::Bad)
+            }
+            10 => split_pairs(value)
+                .into_iter()
+                .find_map(|pair| match pair.split_once('=') {
+                    None => Some(Check::Bad(format!("'{pair}' needs key=value"))),
+                    Some((k, _)) if !git::valid_key(k.trim()) => Some(Check::Bad(format!(
+                        "'{}' is not a key like section.name",
+                        k.trim()
+                    ))),
+                    Some(_) => None,
+                }),
+            _ => None,
+        }
+    }
+
+    /// Whether Ctrl-O lists values for the focused field.
+    pub fn pickable(&self) -> bool {
+        matches!(
+            self.field,
+            SIGNING_KEY | SIGNING_FORMAT | SIGN_COMMITS | SSH_KEY | GH_ACCOUNT
+        )
+    }
+
+    /// The values the focused field can take, looked up in `ssh_dir`, gpg's
+    /// keyring and gh's logins as the field needs.
+    pub fn candidates(&self, ssh_dir: &Path) -> Vec<(String, String)> {
+        let same = |v: &str| (v.to_string(), v.to_string());
+        match self.field {
+            SIGNING_KEY if self.format() == Some(SigningFormat::Ssh) => ssh_keys(ssh_dir, true),
+            SIGNING_KEY => gpg_secret_keys(),
+            SIGNING_FORMAT => ["gpg", "ssh", "x509"].map(same).to_vec(),
+            SIGN_COMMITS => ["yes", "no"].map(same).to_vec(),
+            SSH_KEY => ssh_keys(ssh_dir, false),
+            GH_ACCOUNT => crate::gh::accounts().iter().map(|a| same(a)).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn open_picker(&mut self, items: Vec<(String, String)>) {
+        let current = self.values[self.field].trim();
+        let selected = items.iter().position(|(v, _)| v == current).unwrap_or(0);
+        self.picker = Some(Picker { items, selected });
+    }
+
+    /// Puts the picked value in the field and closes the picker.
+    pub fn pick(&mut self) {
+        if let Some(picker) = self.picker.take()
+            && let Some((value, _)) = picker.items.get(picker.selected)
+        {
+            self.values[self.field] = value.clone();
+            self.cursor = self.len();
+            self.error = None;
+        }
+    }
+
+    pub fn move_picker(&mut self, delta: isize) {
+        if let Some(p) = &mut self.picker
+            && !p.items.is_empty()
+        {
+            p.selected = (p.selected as isize + delta).rem_euclid(p.items.len() as isize) as usize;
         }
     }
 
@@ -251,13 +379,6 @@ impl Form {
             return Err("Git user.email must look like an email address".into());
         }
         let optional = |s: String| if s.is_empty() { None } else { Some(s) };
-        let list = |s: &str| -> Vec<String> {
-            s.split(',')
-                .map(str::trim)
-                .filter(|p| !p.is_empty())
-                .map(String::from)
-                .collect()
-        };
         let remotes = list(&remotes);
         let paths = split_paths(&paths);
         rules::validate(&remotes)?;
@@ -300,6 +421,88 @@ impl Form {
             paths,
         })
     }
+}
+
+fn list(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn key_file(value: &str) -> Option<Check> {
+    let path = git::expand_tilde(Path::new(value));
+    Some(if path.is_file() {
+        Check::Good(format!("{} exists", path.display()))
+    } else {
+        Check::Bad(format!("no such file: {}", path.display()))
+    })
+}
+
+/// Keys in `dir`, as `~` paths: the private ones, which have a `.pub` next
+/// to them, or with `public` those `.pub` files themselves.
+fn ssh_keys(dir: &Path, public: bool) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut keys: Vec<(String, String)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            let is_pub = p.extension().is_some_and(|e| e == "pub");
+            if public {
+                is_pub
+            } else {
+                !is_pub
+                    && p.with_extension(match p.extension() {
+                        Some(e) => format!("{}.pub", e.to_string_lossy()),
+                        None => "pub".into(),
+                    })
+                    .is_file()
+            }
+        })
+        .map(|p| {
+            let shown = crate::scan::tildify(&p);
+            (shown.clone(), shown)
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn gpg_secret_keys() -> Vec<(String, String)> {
+    std::process::Command::new("gpg")
+        .args(["--list-secret-keys", "--with-colons"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| parse_gpg(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+}
+
+/// The secret keys in `gpg --with-colons` output, as their key ID and the
+/// first user ID that follows.
+fn parse_gpg(text: &str) -> Vec<(String, String)> {
+    let mut keys: Vec<(String, String)> = Vec::new();
+    let mut waiting = false;
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        match fields.first() {
+            Some(&"sec") if fields.len() > 4 => {
+                keys.push((fields[4].to_string(), fields[4].to_string()));
+                waiting = true;
+            }
+            Some(&"uid") if waiting && fields.len() > 9 => {
+                if let Some(last) = keys.last_mut() {
+                    last.1 = format!("{}  {}", last.0, fields[9]);
+                }
+                waiting = false;
+            }
+            _ => {}
+        }
+    }
+    keys
 }
 
 /// The key an `ssh -i KEY ...` command offers, unquoting it as a shell
@@ -640,5 +843,106 @@ mod tests {
         assert_eq!(form.values[0], "scratch");
         assert_eq!(form.values[8], "");
         assert_eq!(form.values[9], "/work/scratch");
+    }
+
+    #[test]
+    fn checks_flag_what_saving_would_refuse_or_regret() {
+        let mut form = Form::new();
+        form.values[2] = "ada.example.com".into();
+        assert!(matches!(form.check(2), Some(Check::Bad(_))));
+        form.values[SSH_KEY] = "/nonexistent/id_x".into();
+        assert!(
+            matches!(form.check(SSH_KEY), Some(Check::Bad(m)) if m.starts_with("no such file"))
+        );
+        form.values[SSH_KEY] = "~/.ssh/id_x.pub".into();
+        assert!(matches!(form.check(SSH_KEY), Some(Check::Bad(m)) if m.contains("public key")));
+        let exe = std::env::current_exe().unwrap().display().to_string();
+        form.values[SSH_KEY] = exe;
+        assert!(matches!(form.check(SSH_KEY), Some(Check::Good(_))));
+        form.values[SIGN_COMMITS] = "yes".into();
+        assert_eq!(
+            form.check(SIGN_COMMITS),
+            Some(Check::Bad("signing needs a signing key".into()))
+        );
+        form.values[SIGNING_FORMAT] = "rsa".into();
+        assert!(matches!(form.check(SIGNING_FORMAT), Some(Check::Bad(_))));
+        form.values[PATHS] = "work/**".into();
+        assert!(matches!(form.check(PATHS), Some(Check::Bad(m)) if m.contains("must start with")));
+        form.values[10] = "nonsense, pull.rebase=true".into();
+        assert!(matches!(form.check(10), Some(Check::Bad(m)) if m.contains("'nonsense'")));
+        form.values[REMOTES] = "github.com/acme/*".into();
+        assert_eq!(form.check(REMOTES), None);
+    }
+
+    #[test]
+    fn ssh_keys_lists_private_keys_with_a_public_half() {
+        let dir = std::env::temp_dir().join(format!("gitenv-form-ssh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in [
+            "id_acme",
+            "id_acme.pub",
+            "id_old.key",
+            "id_old.key.pub",
+            "config",
+            "known_hosts",
+        ] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        let names = |keys: Vec<(String, String)>| -> Vec<String> {
+            keys.into_iter()
+                .map(|(v, _)| {
+                    Path::new(&v)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect()
+        };
+        assert_eq!(names(ssh_keys(&dir, false)), ["id_acme", "id_old.key"]);
+        assert_eq!(
+            names(ssh_keys(&dir, true)),
+            ["id_acme.pub", "id_old.key.pub"]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gpg_keys_come_with_their_user_id() {
+        let text = "sec:u:255:22:ABCD1234EF567890:1700000000:::u:::scESC:::+:::23::0:\n\
+                    fpr:::::::::0123456789ABCDEF0123ABCD1234EF567890:\n\
+                    uid:u::::1700000000::HASH::Ada Lovelace <ada@acme.example>::::::::::0:\n\
+                    ssb:u:255:18:1111222233334444:1700000000::::::e:::+:::23:\n\
+                    sec:u:255:22:9999888877776666:1700000000:::u:::scESC:::+:::23::0:\n";
+        assert_eq!(
+            parse_gpg(text),
+            [
+                (
+                    "ABCD1234EF567890".to_string(),
+                    "ABCD1234EF567890  Ada Lovelace <ada@acme.example>".to_string()
+                ),
+                (
+                    "9999888877776666".to_string(),
+                    "9999888877776666".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn picking_fills_the_field() {
+        let mut form = Form::new();
+        form.field = SIGNING_FORMAT;
+        assert!(form.pickable());
+        form.open_picker(form.candidates(Path::new("/nonexistent")));
+        form.move_picker(1);
+        form.move_picker(1);
+        form.move_picker(1);
+        form.pick();
+        assert_eq!(form.values[SIGNING_FORMAT], "gpg");
+        assert!(form.picker.is_none());
+        form.field = 0;
+        assert!(!form.pickable());
     }
 }

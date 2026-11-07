@@ -73,6 +73,47 @@ pub fn known(profile: &Profile) -> Option<Result<String, String>> {
     })
 }
 
+/// Every login gh holds, as `gh_account` takes them: `login` on
+/// github.com, `login@host` elsewhere. Empty without gh.
+pub fn accounts() -> Vec<String> {
+    Command::new("gh")
+        .args(["auth", "status"])
+        .stdin(Stdio::null())
+        .output()
+        .map(|o| {
+            parse_accounts(&format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ))
+        })
+        .unwrap_or_default()
+}
+
+fn parse_accounts(status_text: &str) -> Vec<String> {
+    let mut out: Vec<String> = status_text
+        .lines()
+        .filter_map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let host = words
+                .iter()
+                .position(|w| *w == "to")
+                .and_then(|i| words.get(i + 1))?;
+            let login = words
+                .iter()
+                .position(|w| *w == "account")
+                .and_then(|i| words.get(i + 1))?;
+            Some(if *host == "github.com" {
+                login.to_string()
+            } else {
+                format!("{login}@{host}")
+            })
+        })
+        .collect();
+    out.dedup();
+    out
+}
+
 fn lists_login(status_text: &str, login: &str) -> bool {
     status_text.lines().any(|line| {
         let line = line.trim();
@@ -108,6 +149,15 @@ mod tests {
         );
         assert_eq!(account(&with("  ")), None);
         assert_eq!(account(&Profile::default()), None);
+    }
+
+    #[test]
+    fn accounts_are_named_as_gh_account_takes_them() {
+        let text = "github.com\n  ✓ Logged in to github.com account ada-acme (keyring)\n  - Active account: true\n  ✓ Logged in to github.com account ada (keyring)\nghe.acme.example\n  ✓ Logged in to ghe.acme.example account ada (GH_TOKEN)\n";
+        assert_eq!(
+            parse_accounts(text),
+            ["ada-acme", "ada", "ada@ghe.acme.example"]
+        );
     }
 
     #[test]
