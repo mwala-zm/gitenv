@@ -521,11 +521,21 @@ enum Installed {
     AlreadyThere,
 }
 
-/// Makes `config_file` include `includes` after every setting of `keys`, since
-/// git keeps the last value it reads. A new `[include]` section is appended
-/// rather than using `git config --add`, which would put the line in an
-/// existing `[include]` section, often at the top of the file.
-fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<Installed> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Missing,
+    Overridden,
+    Last,
+}
+
+/// Where `config_file` includes `includes`: not at all, before a setting of
+/// one of `keys` or another include that then wins, or last, so git uses it.
+/// Also returns the spellings of the include it has, for removing them.
+fn placement(
+    config_file: &Path,
+    includes: &Path,
+    keys: &[String],
+) -> Result<(Placement, Vec<String>)> {
     let output = Command::new("git")
         .args(["config", "--file"])
         .arg(config_file)
@@ -551,16 +561,30 @@ fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<
     let last_setting = position(&|k, _| {
         k == "include.path" || keys.iter().any(|key| *key == git::normalize_key(k))
     });
-    let outcome = match (last_ours, last_setting) {
-        (Some(ours), Some(setting)) if setting > ours => Installed::Moved,
-        (Some(_), _) => return Ok(Installed::AlreadyThere),
-        (None, _) => Installed::Added,
+    let place = match (last_ours, last_setting) {
+        (Some(ours), Some(setting)) if setting > ours => Placement::Overridden,
+        (Some(_), _) => Placement::Last,
+        (None, _) => Placement::Missing,
+    };
+    Ok((place, ours.into_iter().map(str::to_owned).collect()))
+}
+
+/// Makes `config_file` include `includes` after every setting of `keys`, since
+/// git keeps the last value it reads. A new `[include]` section is appended
+/// rather than using `git config --add`, which would put the line in an
+/// existing `[include]` section, often at the top of the file.
+fn install_into(config_file: &Path, includes: &Path, keys: &[String]) -> Result<Installed> {
+    let (place, ours) = placement(config_file, includes, keys)?;
+    let outcome = match place {
+        Placement::Overridden => Installed::Moved,
+        Placement::Last => return Ok(Installed::AlreadyThere),
+        Placement::Missing => Installed::Added,
     };
     for value in ours {
         let status = Command::new("git")
             .args(["config", "--file"])
             .arg(config_file)
-            .args(["--fixed-value", "--unset-all", "include.path", value])
+            .args(["--fixed-value", "--unset-all", "include.path", &value])
             .status()
             .context("running git config --unset-all")?;
         if !status.success() {
@@ -601,8 +625,38 @@ fn git_has_hasconfig() -> bool {
     (major, minor) >= (2, 36)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Includes {
+    NotExported,
+    Missing,
+    Overridden,
+    Active,
+}
+
+/// Whether git applies the rules by itself: the files were never exported,
+/// or are exported but your global git config does not include them, or
+/// includes them before settings that win, or includes them last. Exported
+/// files are rewritten first, so they match the profiles as they are now.
+pub fn status(config: &Config, config_path: &Path) -> Result<Includes> {
+    let out = dir(config_path);
+    if !out.join(INCLUDES).exists() {
+        return Ok(Includes::NotExported);
+    }
+    let written = write(config, &out)?;
+    let (place, _) = placement(&global_config_file()?, &written.includes, &written.keys)?;
+    Ok(match place {
+        Placement::Missing => Includes::Missing,
+        Placement::Overridden => Includes::Overridden,
+        Placement::Last => Includes::Active,
+    })
+}
+
 pub fn run(do_install: bool) -> ExitCode {
-    match try_run(do_install) {
+    let outcome = Config::path().and_then(|path| {
+        let config = Config::load(&path)?;
+        export(&config, &path, do_install)
+    });
+    match outcome {
         Ok(msg) => {
             println!("{msg}");
             ExitCode::SUCCESS
@@ -614,10 +668,11 @@ pub fn run(do_install: bool) -> ExitCode {
     }
 }
 
-fn try_run(do_install: bool) -> Result<String> {
-    let config_path = Config::path()?;
-    let config = Config::load(&config_path)?;
-    let written = write(&config, &dir(&config_path))?;
+/// Writes the include files for `config` and, with `do_install`, makes your
+/// global git config include them last, as `gitenv export` does; returns
+/// what it did.
+pub fn export(config: &Config, config_path: &Path, do_install: bool) -> Result<String> {
+    let written = write(config, &dir(config_path))?;
     let mut lines = vec![format!(
         "gitenv: wrote {} profile(s) and {} rule(s) to {}",
         written.profiles,

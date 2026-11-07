@@ -97,7 +97,15 @@ name means [`gitenv doctor`](#command-line) found a problem with it, such
 as a missing ssh key or a signing key gpg does not have; these badges come
 from local checks only, so the list never waits on the network. `D` shows
 the details, then logs in over ssh and asks gh in the background and adds
-what they say. The right pane shows the
+what they say.
+
+At the bottom of the right pane, *Setup* says whether the
+[hooks](#hooks) check commits here and whether git applies your rules
+through the [includes](#let-git-switch-by-itself), and names the key that
+sets up what is missing: `H` for the hooks, `I` for the includes. Both
+change your global git config, so each asks first. The TUI also rewrites
+exported includes when it starts and when you edit the profiles file by
+hand, so they always match your profiles. The right pane shows the
 repository, the identity git will use, where that identity comes from,
 whether it is right, and whether any of the last 20 commits were made as
 someone else.
@@ -114,6 +122,8 @@ someone else.
 | `f` | re-author unpushed commits made as someone else |
 | `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
 | `D` | check the selected profile's keys and logins |
+| `H` | install the hooks that check every commit, in every repository |
+| `I` | let git apply your rules by itself (`gitenv export --install`) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 

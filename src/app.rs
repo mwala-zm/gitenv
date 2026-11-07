@@ -6,11 +6,12 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cmd;
 use crate::doctor::{self, Finding};
-use crate::export;
+use crate::export::{self, Includes};
 use crate::filter::{self, Filter};
 use crate::fix;
 use crate::form::Form;
 use crate::git::{self, Repo};
+use crate::hook::{self, HookStatus};
 use crate::profile::{Config, Profile};
 use crate::rules::{self, Reason};
 use crate::scan::{self, Row};
@@ -26,6 +27,21 @@ pub enum Mode {
     Scan(Box<ScanView>),
     FixAuthors(Box<FixView>),
     Doctor(Box<DoctorView>),
+    ConfirmSetup(SetupAction),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupAction {
+    Hooks,
+    Includes,
+}
+
+/// Whether commits are checked by the hooks, and whether git applies the
+/// rules by itself through the exported includes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setup {
+    pub hooks: HookStatus,
+    pub includes: Result<Includes, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +171,7 @@ pub struct App {
     pub health: Vec<Vec<Finding>>,
     pub doctor_rx: Option<Receiver<Vec<Finding>>>,
     pub ssh_probe: SshProbe,
+    pub setup: Option<Setup>,
 }
 
 impl App {
@@ -212,8 +229,10 @@ impl App {
             health: Vec::new(),
             doctor_rx: None,
             ssh_probe: doctor::ssh_probe,
+            setup: None,
         };
         app.check_health();
+        app.check_setup();
         app.select_active();
         if started_outside {
             let status = app.status.take();
@@ -243,7 +262,17 @@ impl App {
             health: Vec::new(),
             doctor_rx: None,
             ssh_probe: |_, _| Err("no network in tests".into()),
+            setup: None,
         }
+    }
+
+    /// Looks at the hooks for this repository and the includes, which also
+    /// brings exported includes in line with the profiles.
+    pub fn check_setup(&mut self) {
+        self.setup = Some(Setup {
+            hooks: hook::status(self.repo.as_ref().map(|r| r.root.as_path())),
+            includes: export::status(&self.config, &self.config_path).map_err(|e| format!("{e:#}")),
+        });
     }
 
     /// Runs doctor's local checks on every profile, for the badges in the
@@ -325,6 +354,14 @@ impl App {
             Mode::Scan(_) => self.handle_scan_key(key),
             Mode::FixAuthors(_) => self.handle_fix_key(key),
             Mode::Doctor(_) => self.handle_doctor_key(key),
+            Mode::ConfirmSetup(action) => {
+                self.mode = Mode::Normal;
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                    self.run_setup(action);
+                } else {
+                    self.status = Some("Nothing was changed".into());
+                }
+            }
         }
     }
 
@@ -350,6 +387,8 @@ impl App {
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('D'), _) => self.open_doctor(),
+            (KeyCode::Char('H'), _) => self.ask_setup(SetupAction::Hooks),
+            (KeyCode::Char('I'), _) => self.ask_setup(SetupAction::Includes),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
             (KeyCode::Char('e'), _) => {
@@ -453,6 +492,9 @@ impl App {
                 self.config = config;
                 self.config_text = std::fs::read_to_string(&self.config_path).ok();
                 self.check_health();
+                if self.setup.is_some() {
+                    self.check_setup();
+                }
                 self.selected = self
                     .selected
                     .min(self.config.profiles.len().saturating_sub(1));
@@ -947,6 +989,49 @@ impl App {
         }
     }
 
+    /// Asks before installing what `action` names, unless it is in place.
+    fn ask_setup(&mut self, action: SetupAction) {
+        let done = self.setup.as_ref().is_some_and(|s| match action {
+            SetupAction::Hooks => s.hooks == HookStatus::Everywhere,
+            SetupAction::Includes => s.includes == Ok(Includes::Active),
+        });
+        if done {
+            self.status = Some(match action {
+                SetupAction::Hooks => "The hooks already check every repository".into(),
+                SetupAction::Includes => "git already applies your rules by itself".into(),
+            });
+        } else {
+            self.mode = Mode::ConfirmSetup(action);
+        }
+    }
+
+    /// Installs the hooks for every repository, as `gitenv hook install
+    /// --global` does, or the includes, as `gitenv export --install` does.
+    fn run_setup(&mut self, action: SetupAction) {
+        self.status = Some(match action {
+            SetupAction::Hooks => {
+                let home = directories::UserDirs::new().map(|d| d.home_dir().to_path_buf());
+                let dir = self
+                    .repo
+                    .as_ref()
+                    .map(|r| r.root.clone())
+                    .or(home)
+                    .unwrap_or_else(std::env::temp_dir);
+                match hook::install(&dir, true) {
+                    Ok(_) => "Installed the hooks; every commit and push is checked now".into(),
+                    Err(err) => format!("Could not install the hooks: {err:#}"),
+                }
+            }
+            SetupAction::Includes => match export::export(&self.config, &self.config_path, true) {
+                Ok(_) => {
+                    "Installed the includes; new clones get the right identity by themselves".into()
+                }
+                Err(err) => format!("Could not install the includes: {err:#}"),
+            },
+        });
+        self.check_setup();
+    }
+
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -986,6 +1071,9 @@ impl App {
             && let Ok(Some(fresh)) = git::discover(&repo.root)
         {
             self.repo = Some(fresh);
+        }
+        if self.setup.is_some() {
+            self.check_setup();
         }
     }
 
@@ -1616,5 +1704,28 @@ mod tests {
         );
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    #[test]
+    fn setup_keys_ask_first_and_skip_what_is_in_place() {
+        let mut app = app_with("setup", vec![profile("a")]);
+        app.setup = Some(Setup {
+            hooks: HookStatus::Everywhere,
+            includes: Ok(Includes::Missing),
+        });
+        app.handle_key(KeyEvent::from(KeyCode::Char('H')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(
+            app.status.as_deref(),
+            Some("The hooks already check every repository")
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('I')));
+        assert!(matches!(
+            app.mode,
+            Mode::ConfirmSetup(SetupAction::Includes)
+        ));
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.status.as_deref(), Some("Nothing was changed"));
     }
 }

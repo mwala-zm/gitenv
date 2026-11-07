@@ -5,11 +5,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, DoctorView, FixView, Mode, ScanView};
+use crate::app::{App, DoctorView, FixView, Mode, ScanView, Setup, SetupAction};
 use crate::doctor::Level;
+use crate::export::Includes;
 use crate::filter::Filter;
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
+use crate::hook::HookStatus;
 use crate::rules;
 use crate::scan;
 
@@ -103,6 +105,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::Edit(form) => render_form(frame, form),
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
         Mode::Doctor(view) => render_doctor(frame, view),
+        Mode::ConfirmSetup(action) => render_confirm_setup(frame, *action, app),
         Mode::Scan(_) | Mode::FixAuthors(_) => {}
     }
 }
@@ -452,6 +455,8 @@ fn render_help(frame: &mut Frame) {
         ("f", "re-author unpushed commits made as someone else"),
         ("/", "filter the list; Enter keeps it, Esc clears it"),
         ("D", "check the selected profile's keys and logins"),
+        ("H", "install the hooks that check every commit"),
+        ("I", "let git apply your rules by itself"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -724,7 +729,11 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered().title(" Current repository ");
 
     let Some(repo) = &app.repo else {
-        let text = Paragraph::new("Not inside a git repository.".yellow()).block(block);
+        let mut lines = vec![Line::from("Not inside a git repository.".yellow())];
+        lines.extend(setup_lines(app.setup.as_ref()));
+        let text = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block);
         frame.render_widget(text, area);
         return;
     };
@@ -789,6 +798,7 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
     }
     lines.extend([Line::from(""), verdict, rule_note, local_note]);
     lines.extend(history_lines(repo, app.reference_email()));
+    lines.extend(setup_lines(app.setup.as_ref()));
 
     let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -847,6 +857,114 @@ fn history_lines(repo: &Repo, reference: Option<&str>) -> Vec<Line<'static>> {
         ));
     }
     lines
+}
+
+/// Whether the hooks check commits and git applies the rules by itself,
+/// each with the key that puts it right.
+fn setup_lines(setup: Option<&Setup>) -> Vec<Line<'static>> {
+    let Some(setup) = setup else {
+        return Vec::new();
+    };
+    let row = |label: &'static str, good: bool, text: String, hint: Option<&'static str>| {
+        let mut spans = vec![
+            Span::styled(format!("{label:<12}"), Style::new().dim()),
+            if good {
+                "✔ ".green()
+            } else {
+                "✘ ".yellow()
+            },
+            if good { text.into() } else { text.yellow() },
+        ];
+        if let Some(hint) = hint {
+            spans.push(format!(" · {hint}").dim());
+        }
+        Line::from(spans)
+    };
+    let hooks = match setup.hooks {
+        HookStatus::Everywhere => row("hooks", true, "check every commit and push".into(), None),
+        HookStatus::ThisRepo => row(
+            "hooks",
+            true,
+            "check this repository only".into(),
+            Some("H for every one"),
+        ),
+        HookStatus::Missing => row(
+            "hooks",
+            false,
+            "not installed".into(),
+            Some("H installs them"),
+        ),
+    };
+    let includes = match &setup.includes {
+        Ok(Includes::Active) => row(
+            "includes",
+            true,
+            "git applies your rules itself".into(),
+            None,
+        ),
+        Ok(Includes::Overridden) => row(
+            "includes",
+            false,
+            "later settings win".into(),
+            Some("I moves them last"),
+        ),
+        Ok(Includes::Missing) => row(
+            "includes",
+            false,
+            "not installed".into(),
+            Some("I installs them"),
+        ),
+        Ok(Includes::NotExported) => row(
+            "includes",
+            false,
+            "not set up".into(),
+            Some("I sets them up"),
+        ),
+        Err(err) => row("includes", false, format!("could not check: {err}"), None),
+    };
+    vec![Line::from(""), Line::from("Setup".bold()), hooks, includes]
+}
+
+fn render_confirm_setup(frame: &mut Frame, action: SetupAction, app: &App) {
+    let includes = crate::export::dir(&app.config_path).join(crate::export::INCLUDES);
+    let (title, question, what): (&str, &str, Vec<String>) = match action {
+        SetupAction::Hooks => (
+            " Install hooks ",
+            "Check every commit and push in every repository?",
+            vec![
+                "Runs `gitenv hook install --global`: writes the hooks into".into(),
+                "your global core.hooksPath, setting it to ~/.githooks if".into(),
+                "it is unset. Each repository's own hooks still run.".into(),
+            ],
+        ),
+        SetupAction::Includes => (
+            " Install includes ",
+            "Let git pick the identity by itself?",
+            vec![
+                "Runs `gitenv export --install`: adds an include of".into(),
+                scan::tildify(&includes),
+                "to the end of your global git config, so a fresh clone".into(),
+                "has the right identity before its first commit.".into(),
+            ],
+        ),
+    };
+    let mut lines = vec![Line::from(question.bold()), Line::from("")];
+    lines.extend(what.into_iter().map(|l| Line::from(l.dim())));
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![
+            " y / Enter ".bold(),
+            "install   ".dim(),
+            " any other key ".bold(),
+            "cancel".dim(),
+        ]),
+    ]);
+    let area = centered(frame.area(), 66, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        area,
+    );
 }
 
 fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -1164,6 +1282,19 @@ mod tests {
             checking: true,
         }));
         insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn setup_section_and_its_popup() {
+        let mut app = app(profiles(), Some(repo()));
+        app.repo.as_mut().unwrap().authors.clear();
+        app.setup = Some(Setup {
+            hooks: HookStatus::Missing,
+            includes: Ok(Includes::Overridden),
+        });
+        insta::assert_snapshot!("setup_section", draw(&app));
+        app.mode = Mode::ConfirmSetup(SetupAction::Includes);
+        insta::assert_snapshot!("setup_popup", draw(&app));
     }
 
     #[test]

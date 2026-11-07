@@ -255,6 +255,40 @@ fn keep_handovers(hooks: &Path) -> Result<Vec<String>> {
     Ok(lines)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookStatus {
+    Everywhere,
+    ThisRepo,
+    Missing,
+}
+
+/// Whether the pre-commit hook in `hooks` runs `gitenv check`, as gitenv
+/// wrote it, edited since, or written by hand. The hook that only hands over
+/// to a repository's own, which `remove --global` can leave, does not.
+fn checks(hooks: &Path) -> bool {
+    fs::read_to_string(hooks.join("pre-commit")).is_ok_and(|t| t.contains("gitenv check"))
+}
+
+/// Whether commits are checked in every repository, through the global
+/// core.hooksPath, only in `repo`, or not at all.
+pub fn status(repo: Option<&Path>) -> HookStatus {
+    let home = directories::UserDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+    if let Ok((hooks, false)) = hooks_dir(repo.unwrap_or(&home), true)
+        && checks(&hooks)
+    {
+        return HookStatus::Everywhere;
+    }
+    if let Some(repo) = repo
+        && let Ok((hooks, _)) = hooks_dir(repo, false)
+        && checks(&hooks)
+    {
+        return HookStatus::ThisRepo;
+    }
+    HookStatus::Missing
+}
+
 pub fn install(dir: &Path, global: bool) -> Result<String> {
     let (hooks, unset) = hooks_dir(dir, global)?;
     let mut lines = vec![format!("gitenv: hooks in {}", hooks.display())];
@@ -553,6 +587,25 @@ mod tests {
         assert_eq!(state(&hooks.join("pre-commit"), "pre-commit"), State::Ours);
         assert_eq!(fs::read_to_string(hooks.join("pre-push")).unwrap(), text);
         assert!(hooks.join("commit-msg").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_hook_that_runs_the_check_counts() {
+        let dir = std::env::temp_dir().join(format!("gitenv-hook-checks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!checks(&dir));
+        fs::write(
+            dir.join("pre-commit"),
+            script_for("pre-commit", false, true),
+        )
+        .unwrap();
+        assert!(!checks(&dir), "a hand-over alone checks nothing");
+        fs::write(dir.join("pre-commit"), script("pre-commit", true)).unwrap();
+        assert!(checks(&dir));
+        fs::write(dir.join("pre-commit"), "#!/bin/sh\nexec gitenv check\n").unwrap();
+        assert!(checks(&dir), "a hook written by hand counts");
         fs::remove_dir_all(&dir).unwrap();
     }
 }
