@@ -27,7 +27,7 @@ function M.check()
     health.ok(("%d profile(s), so :GitenvApply can complete their names"):format(n))
   elseif (profiles.stderr or ""):match("unrecognized subcommand") then
     health.warn("this gitenv has no `profiles` command, so :GitenvApply cannot complete names", {
-      "update gitenv to a release newer than 0.3.0",
+      "update gitenv to 0.4.0 or newer",
     })
   else
     health.error("gitenv could not read the profiles file: " .. vim.trim(profiles.stderr or ""))
