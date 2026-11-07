@@ -316,6 +316,10 @@ fn resolve_dir(arg: Option<PathBuf>) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Draws and handles keys until the app quits. Work the app leaves pending
+/// runs between frames, with the terminal handed back first when it may ask
+/// for a passphrase, since pinentry and ssh cannot prompt while the UI holds
+/// the screen in raw mode.
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     while !app.should_quit {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -323,6 +327,16 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             && key.kind == KeyEventKind::Press
         {
             app.handle_key(key);
+        }
+        if app.pending.is_some() {
+            if app.pending_needs_terminal() {
+                ratatui::restore();
+                println!("gitenv: rewriting commits; sign them if asked");
+                app.run_pending();
+                *terminal = ratatui::init();
+            } else {
+                app.run_pending();
+            }
         }
     }
     Ok(())

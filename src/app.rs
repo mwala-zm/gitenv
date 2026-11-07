@@ -5,6 +5,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cmd;
 use crate::export;
+use crate::fix;
 use crate::form::Form;
 use crate::git::{self, Repo};
 use crate::profile::{Config, Profile};
@@ -18,6 +19,49 @@ pub enum Mode {
     Edit(Box<Form>),
     ConfirmDelete,
     Scan(Box<ScanView>),
+    FixAuthors(Box<FixView>),
+}
+
+/// Work the main loop runs between frames, so it can hand the terminal
+/// back first when the work may ask for a passphrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    FixAuthors,
+}
+
+#[derive(Debug, Clone)]
+pub struct FixView {
+    pub profile: Profile,
+    pub why: String,
+    pub plan: fix::Plan,
+    pub ticked: Vec<bool>,
+    pub cursor: usize,
+    pub blocked: Option<String>,
+    pub signs: bool,
+    pub confirming: bool,
+}
+
+impl FixView {
+    pub fn chosen(&self) -> Vec<String> {
+        self.plan
+            .wrong
+            .iter()
+            .zip(&self.ticked)
+            .filter(|(_, t)| **t)
+            .map(|(c, _)| c.hash.clone())
+            .collect()
+    }
+
+    /// How many unpushed commits get a new hash: every one from the first
+    /// ticked commit on.
+    pub fn rebuilt(&self) -> usize {
+        let chosen = self.chosen();
+        self.plan
+            .unpushed
+            .iter()
+            .position(|c| chosen.contains(&c.hash))
+            .map_or(0, |start| self.plan.unpushed.len() - start)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +81,7 @@ pub struct App {
     pub should_quit: bool,
     pub scan_root: PathBuf,
     pub config_text: Option<String>,
+    pub pending: Option<Pending>,
 }
 
 impl App {
@@ -87,6 +132,7 @@ impl App {
             should_quit: false,
             scan_root,
             config_text,
+            pending: None,
         };
         app.select_active();
         if started_outside {
@@ -119,7 +165,10 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
-        if matches!(self.mode, Mode::Normal | Mode::Scan(_)) {
+        if matches!(
+            self.mode,
+            Mode::Normal | Mode::Scan(_) | Mode::FixAuthors(_)
+        ) {
             self.status = None;
         }
         match self.mode {
@@ -128,6 +177,7 @@ impl App {
             Mode::Edit(_) => self.handle_edit_key(key),
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
             Mode::Scan(_) => self.handle_scan_key(key),
+            Mode::FixAuthors(_) => self.handle_fix_key(key),
         }
     }
 
@@ -143,6 +193,7 @@ impl App {
                 self.refresh();
             }
             (KeyCode::Char('s'), _) => self.open_scan(),
+            (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
             (KeyCode::Char('e'), _) => {
@@ -401,6 +452,139 @@ impl App {
         }
     }
 
+    /// Plans re-authoring this repo's unpushed commits as the profile a rule
+    /// claims it for, or else the highlighted one, and opens the view when
+    /// any were made as someone else.
+    fn open_fix_authors(&mut self) {
+        let Some(repo) = &self.repo else {
+            self.status = Some("Not inside a git repository".into());
+            return;
+        };
+        let (profile, why) = match self.expected_profile() {
+            Some((profile, reason)) => (profile, format!("rule: {reason}")),
+            None => match self.selected_profile() {
+                Some(profile) => (profile, "the highlighted profile".to_string()),
+                None => {
+                    self.status = Some("No profile to re-author as; press n to create one".into());
+                    return;
+                }
+            },
+        };
+        let plan = match fix::plan(&repo.root, profile) {
+            Ok(plan) => plan,
+            Err(err) => {
+                self.status = Some(format!("Could not read the commits: {err:#}"));
+                return;
+            }
+        };
+        if plan.wrong.is_empty() {
+            let pushed = match plan.pushed_wrong.len() {
+                0 => String::new(),
+                n => format!("; {n} pushed one(s) were not, and are left alone"),
+            };
+            self.status = Some(match plan.unpushed.len() {
+                0 => format!("No unpushed commits to fix{pushed}"),
+                n => format!(
+                    "All {n} unpushed commit(s) are by '{}'{pushed}",
+                    profile.name
+                ),
+            });
+            return;
+        }
+        let blocked = fix::preflight(&repo.root, &plan)
+            .err()
+            .map(|e| format!("{e:#}"));
+        self.mode = Mode::FixAuthors(Box::new(FixView {
+            signs: fix::signs(repo, profile),
+            profile: profile.clone(),
+            why,
+            ticked: vec![true; plan.wrong.len()],
+            plan,
+            cursor: 0,
+            blocked,
+            confirming: false,
+        }));
+    }
+
+    fn handle_fix_key(&mut self, key: KeyEvent) {
+        let Mode::FixAuthors(view) = &mut self.mode else {
+            return;
+        };
+        if view.confirming {
+            view.confirming = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                self.pending = Some(Pending::FixAuthors);
+            } else {
+                self.status = Some("Nothing was rewritten".into());
+            }
+            return;
+        }
+        let len = view.ticked.len().max(1);
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
+                self.should_quit = true
+            }
+            (KeyCode::Esc, _) | (KeyCode::Char('f'), _) => self.mode = Mode::Normal,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => view.cursor = (view.cursor + 1) % len,
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                view.cursor = (view.cursor + len - 1) % len
+            }
+            (KeyCode::Char(' '), _) => {
+                if let Some(t) = view.ticked.get_mut(view.cursor) {
+                    *t = !*t;
+                }
+            }
+            (KeyCode::Char('a'), _) => {
+                let all = view.ticked.iter().all(|t| *t);
+                view.ticked.iter_mut().for_each(|t| *t = !all);
+            }
+            (KeyCode::Enter, _) => {
+                if let Some(why) = &view.blocked {
+                    self.status = Some(format!("Cannot rewrite: {why}"));
+                } else if view.ticked.iter().any(|t| *t) {
+                    view.confirming = true;
+                } else {
+                    self.status = Some("Nothing is ticked; press space to tick a commit".into());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the pending work may ask for a passphrase, so the terminal has
+    /// to be handed back while it runs.
+    pub fn pending_needs_terminal(&self) -> bool {
+        match (&self.pending, &self.mode) {
+            (Some(Pending::FixAuthors), Mode::FixAuthors(view)) => view.signs,
+            _ => false,
+        }
+    }
+
+    pub fn run_pending(&mut self) {
+        let Some(Pending::FixAuthors) = self.pending.take() else {
+            return;
+        };
+        let Mode::FixAuthors(view) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            return;
+        };
+        let Some(repo) = &self.repo else {
+            return;
+        };
+        let chosen = view.chosen();
+        let outcome = fix::rewrite_chosen(repo, &view.profile, &view.plan, &chosen, &mut |_, _| {});
+        self.status = Some(match outcome {
+            Ok(()) => format!(
+                "Rewrote {} commit(s) as '{}' and applied it{}; the old ones are in git reflog",
+                view.rebuilt(),
+                view.profile.name,
+                cmd::gh_note(&view.profile)
+            ),
+            Err(err) => format!("Fix authors failed: {err:#}"),
+        });
+        self.refresh();
+        self.select_active();
+    }
+
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -477,6 +661,7 @@ mod tests {
             should_quit: false,
             scan_root: std::env::temp_dir(),
             config_text: None,
+            pending: None,
         }
     }
 
@@ -677,5 +862,157 @@ mod tests {
         let saved = std::fs::read_to_string(&app.config_path).unwrap();
         assert!(saved.contains("# added in my editor") && saved.contains("name = \"b\""));
         std::fs::remove_file(&app.config_path).ok();
+    }
+
+    fn fix_repo(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("gitenv-app-fix-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        fix_git(&dir, &["init", "-q"]);
+        fix_git(&dir, &["config", "--local", "user.name", "Ada"]);
+        fix_git(
+            &dir,
+            &["config", "--local", "user.email", "ada@example.com"],
+        );
+        dir
+    }
+
+    fn fix_git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn fix_commit(dir: &Path, email: &str, msg: &str) {
+        fix_git(
+            dir,
+            &[
+                "-c",
+                &format!("user.email={email}"),
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                msg,
+            ],
+        );
+    }
+
+    fn acme_app(tag: &str, dir: &Path) -> App {
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        acme.sign_commits = Some(false);
+        let mut app = app_with(tag, vec![profile("personal"), acme]);
+        app.repo = git::discover(dir).unwrap();
+        app.selected = 1;
+        app
+    }
+
+    #[test]
+    fn fix_authors_with_nothing_wrong_only_says_so() {
+        let dir = fix_repo("clean");
+        fix_commit(&dir, "ada@acme.example", "right");
+        let mut app = acme_app("fixclean", &dir);
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(
+            app.status.as_deref(),
+            Some("All 1 unpushed commit(s) are by 'acme'")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fix_authors_ticks_toggles_and_cancels() {
+        let dir = fix_repo("toggle");
+        fix_commit(&dir, "ada@example.com", "one");
+        fix_commit(&dir, "bob@acme.example", "two");
+        let head = fix_git(&dir, &["rev-parse", "HEAD"]);
+        let mut app = acme_app("fixtoggle", &dir);
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        let Mode::FixAuthors(view) = &app.mode else {
+            panic!("f should open the view: {:?}", app.status);
+        };
+        assert_eq!(view.ticked, [true, true]);
+        assert_eq!(view.why, "the highlighted profile");
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        let Mode::FixAuthors(view) = &app.mode else {
+            panic!()
+        };
+        assert_eq!(view.ticked, [true, false]);
+        assert_eq!(view.rebuilt(), 2);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        let Mode::FixAuthors(view) = &app.mode else {
+            panic!()
+        };
+        assert_eq!(view.ticked, [true, true]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('a')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Nothing is ticked")
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let Mode::FixAuthors(view) = &app.mode else {
+            panic!()
+        };
+        assert!(view.confirming);
+        app.handle_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(app.pending, None);
+        assert_eq!(app.status.as_deref(), Some("Nothing was rewritten"));
+        assert_eq!(fix_git(&dir, &["rev-parse", "HEAD"]), head);
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fix_authors_rewrites_only_the_ticked_commits() {
+        let dir = fix_repo("rewrite");
+        fix_commit(&dir, "ada@example.com", "mine");
+        fix_commit(&dir, "bob@acme.example", "pairing");
+        let mut app = acme_app("fixrewrite", &dir);
+        app.handle_key(KeyEvent::from(KeyCode::Char('f')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('j')));
+        app.handle_key(KeyEvent::from(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Char('y')));
+        assert_eq!(app.pending, Some(Pending::FixAuthors));
+        assert!(!app.pending_needs_terminal());
+        app.run_pending();
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Rewrote 2 commit(s) as 'acme'"),
+            "{:?}",
+            app.status
+        );
+        assert_eq!(
+            fix_git(&dir, &["log", "--format=%ae %s"]),
+            "bob@acme.example pairing\nada@acme.example mine"
+        );
+        assert_eq!(app.active_profile().unwrap().name, "acme");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

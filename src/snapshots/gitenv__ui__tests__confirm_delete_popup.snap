@@ -27,4 +27,4 @@ expression: draw(&app)
 "│  \__, |_|\__|\___|_| |_| \_/   ││                                                            │"
 "│  |___/                         ││                                                            │"
 "└────────────────────────────────┘└────────────────────────────────────────────────────────────┘"
-" ↑↓/jk select   Enter apply to repo   e edit   n new   d delete   ? help   q quit               "
+" ↑↓/jk select   Enter apply to repo   e edit   n new   d delete   f authors   ? help   q quit   "

@@ -81,13 +81,17 @@ fn published(branch: Option<&str>) -> Vec<String> {
 }
 
 fn unpushed(root: &Path, branch: Option<&str>) -> Result<Vec<Commit>> {
+    let mut revs = vec!["--reverse".to_string(), "HEAD".into()];
+    revs.extend(published(branch));
+    log(root, revs)
+}
+
+fn log(root: &Path, revs: Vec<String>) -> Result<Vec<Commit>> {
     let mut args = vec![
         "log".to_string(),
-        "--reverse".into(),
         "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce%x00%s".into(),
-        "HEAD".into(),
     ];
-    args.extend(published(branch));
+    args.extend(revs);
     args.push("--".into());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let text = git_out(root, &args)?;
@@ -110,12 +114,35 @@ fn unpushed(root: &Path, branch: Option<&str>) -> Result<Vec<Commit>> {
         .collect())
 }
 
+#[derive(Debug, Clone)]
 pub struct Plan {
     pub unpushed: Vec<Commit>,
     pub wrong: Vec<Commit>,
+    pub pushed_wrong: Vec<Commit>,
     head: String,
     branch: Option<String>,
 }
+
+impl Plan {
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref().map(short)
+    }
+
+    #[cfg(test)]
+    pub fn for_test(unpushed: Vec<Commit>, wrong: Vec<Commit>, pushed_wrong: Vec<Commit>) -> Self {
+        Self {
+            unpushed,
+            wrong,
+            pushed_wrong,
+            head: String::new(),
+            branch: Some("refs/heads/main".into()),
+        }
+    }
+}
+
+/// How many of the commits before the unpushed ones are looked at for ones
+/// made as someone else, as the main view's recent commits are.
+const RECENT: usize = 20;
 
 fn is_profile(name: &str, email: &str, profile: &Profile) -> bool {
     name == git::as_git_writes(&profile.user_name) && email.eq_ignore_ascii_case(&profile.email)
@@ -128,6 +155,7 @@ pub fn plan(root: &Path, profile: &Profile) -> Result<Plan> {
             return Ok(Plan {
                 unpushed: Vec::new(),
                 wrong: Vec::new(),
+                pushed_wrong: Vec::new(),
                 head: String::new(),
                 branch: None,
             });
@@ -143,9 +171,15 @@ pub fn plan(root: &Path, profile: &Profile) -> Result<Plan> {
         })
         .cloned()
         .collect();
+    let pushed_wrong = log(root, vec![format!("--max-count={RECENT}"), "HEAD".into()])?
+        .into_iter()
+        .filter(|c| !unpushed.iter().any(|u| u.hash == c.hash))
+        .filter(|c| !is_profile(&c.author, &c.email, profile))
+        .collect();
     Ok(Plan {
         unpushed,
         wrong,
+        pushed_wrong,
         head,
         branch,
     })
@@ -166,7 +200,7 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf> {
 /// copy of, as in a single-branch clone, since it may be pushed without gitenv
 /// seeing it; when the commits include a merge; and when they reach a shallow
 /// clone's cut-off.
-fn preflight(root: &Path, plan: &Plan) -> Result<()> {
+pub fn preflight(root: &Path, plan: &Plan) -> Result<()> {
     for (name, what) in [
         ("rebase-merge", "a rebase"),
         ("rebase-apply", "a rebase or git am"),
@@ -219,6 +253,7 @@ struct Raw {
     tree: String,
     parents: Vec<String>,
     author: Vec<u8>,
+    committer: Vec<u8>,
     encoding: Option<String>,
     others: Vec<u8>,
     message: Vec<u8>,
@@ -277,6 +312,7 @@ fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
         tree: String::new(),
         parents: Vec::new(),
         author: Vec::new(),
+        committer: Vec::new(),
         encoding: None,
         others: Vec::new(),
         message: bytes.get(split + 1..).unwrap_or_default().to_vec(),
@@ -297,7 +333,12 @@ fn parse_commit(hash: &str, bytes: &[u8]) -> Result<Raw> {
             "tree" => raw.tree = value.to_string(),
             "parent" => raw.parents.push(value.to_string()),
             "author" => raw.author = line[7..].strip_suffix(b"\n").unwrap_or(&line[7..]).to_vec(),
-            "committer" => {}
+            "committer" => {
+                raw.committer = line[10..]
+                    .strip_suffix(b"\n")
+                    .unwrap_or(&line[10..])
+                    .to_vec()
+            }
             "gpgsig" | "gpgsig-sha256" | "mergetag" => skipping = true,
             "encoding" => {
                 raw.encoding = Some(value.to_string());
@@ -376,7 +417,8 @@ fn write_commit(
                     "GIT_COMMITTER_NAME",
                     String::from_utf8_lossy(cname).as_ref(),
                 )
-                .env("GIT_COMMITTER_EMAIL", crest.0);
+                .env("GIT_COMMITTER_EMAIL", crest.0)
+                .env("GIT_COMMITTER_DATE", format!("@{}", crest.1));
             input.extend_from_slice(&raw.message);
         }
         None => {
@@ -427,34 +469,52 @@ fn split_at_email(ident: &[u8]) -> (&[u8], (String, String)) {
     (ident[..open].trim_ascii_end(), (email, date))
 }
 
-/// Rebuilds the unpushed commits from the first wrong one on, from their own
-/// trees, headers and exact message bytes, with the profile as author of each
-/// one whose author is wrong (keeping its date) and as committer of all of
-/// them. git runs with replace objects off so their content is never baked
-/// in. The branch HEAD was on when planning then moves once with
-/// `update-ref` from exactly the planned tip, so a commit or branch switch
-/// made meanwhile makes it refuse. The work tree, index, ignored files and
-/// hooks are never touched, and the profile is applied only after all that
-/// worked.
+/// Rebuilds every wrong unpushed commit; see [`rewrite_chosen`].
+#[cfg(test)]
 pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
+    let all: Vec<String> = plan.wrong.iter().map(|c| c.hash.clone()).collect();
+    rewrite_chosen(repo, profile, plan, &all, &mut |_, _| {})
+}
+
+/// Whether rewriting as `profile` signs the new commits, which may ask for
+/// a passphrase.
+pub fn signs(repo: &Repo, profile: &Profile) -> bool {
+    profile
+        .sign_commits
+        .or(repo.effective.sign_commits)
+        .unwrap_or(false)
+}
+
+/// Rebuilds the unpushed commits from the first chosen one on, from their own
+/// trees, headers and exact message bytes. A chosen commit gets the profile as
+/// author when its author is wrong (keeping its date); a wrong commit that was
+/// not chosen keeps its author and committer as they are; every other one gets
+/// the profile as committer. git runs with replace objects off so their
+/// content is never baked in. The branch HEAD was on when planning then moves
+/// once with `update-ref` from exactly the planned tip, so a commit or branch
+/// switch made meanwhile makes it refuse. The work tree, index, ignored files
+/// and hooks are never touched, and the profile is applied only after all
+/// that worked. `progress` is told every hundred commits how many of how many
+/// are done, and once more at the end.
+pub fn rewrite_chosen(
+    repo: &Repo,
+    profile: &Profile,
+    plan: &Plan,
+    chosen: &[String],
+    progress: &mut dyn FnMut(usize, usize),
+) -> Result<()> {
     let root = &repo.root;
     preflight(root, plan)?;
-    let Some(first) = plan.wrong.first() else {
+    let is_chosen =
+        |hash: &str| chosen.iter().any(|c| c == hash) && plan.wrong.iter().any(|w| w.hash == hash);
+    let Some(start) = plan.unpushed.iter().position(|c| is_chosen(&c.hash)) else {
         return Ok(());
     };
     if current_branch(root) != plan.branch {
         bail!("HEAD moved to another branch since gitenv looked; nothing was changed");
     }
-    let start = plan
-        .unpushed
-        .iter()
-        .position(|c| c.hash == first.hash)
-        .context("planned commit is not on HEAD")?;
 
-    let sign = profile
-        .sign_commits
-        .or(repo.effective.sign_commits)
-        .unwrap_or(false);
+    let sign = signs(repo, profile);
     let mut settings = Vec::new();
     if let Some(key) = &profile.signing_key {
         settings.push(format!("user.signingkey={key}"));
@@ -475,14 +535,14 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
     let todo = &plan.unpushed[start..];
     let hashes: Vec<&str> = todo.iter().map(|c| c.hash.as_str()).collect();
     let raws = read_commits(root, &hashes)?;
-    let progress = todo.len() >= 200 && io::stderr().is_terminal();
     let mut replaced: Option<(String, String)> = None;
     for (i, (commit, raw)) in todo.iter().zip(raws).enumerate() {
-        if progress && i % 100 == 0 {
-            eprint!("\rgitenv: rewriting commit {} of {}", i + 1, todo.len());
+        if i % 100 == 0 {
+            progress(i, todo.len());
         }
         let encoding = raw.encoding.as_deref();
-        let author = if is_profile(&commit.author, &commit.email, profile) {
+        let kept = plan.wrong.iter().any(|w| w.hash == commit.hash) && !is_chosen(&commit.hash);
+        let author = if kept || is_profile(&commit.author, &commit.email, profile) {
             raw.author.clone()
         } else {
             ident(
@@ -491,7 +551,11 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
                 date_of(&raw.author),
             )
         };
-        let committer = ident(&encode(name, encoding), &profile.email, &now);
+        let committer = if kept {
+            raw.committer.clone()
+        } else {
+            ident(&encode(name, encoding), &profile.email, &now)
+        };
         let parents: Vec<String> = raw
             .parents
             .iter()
@@ -511,9 +575,7 @@ pub fn rewrite(repo: &Repo, profile: &Profile, plan: &Plan) -> Result<()> {
         replaced = Some((commit.hash.clone(), new));
     }
 
-    if progress {
-        eprintln!("\rgitenv: rewrote {} commits{:10}", todo.len(), "");
-    }
+    progress(todo.len(), todo.len());
     let (_, new_head) = replaced.context("nothing was rebuilt")?;
     let target = plan.branch.as_deref().unwrap_or("HEAD");
     let mut args = vec![
@@ -593,7 +655,17 @@ fn try_run(dir: &Path, yes: bool) -> Result<ExitCode> {
             return Ok(ExitCode::from(1));
         }
     }
-    rewrite(&repo, profile, &plan)?;
+    let all: Vec<String> = plan.wrong.iter().map(|c| c.hash.clone()).collect();
+    let show = io::stderr().is_terminal();
+    rewrite_chosen(&repo, profile, &plan, &all, &mut |done, total| {
+        if show && total >= 200 {
+            if done < total {
+                eprint!("\rgitenv: rewriting commit {} of {total}", done + 1);
+            } else {
+                eprintln!("\rgitenv: rewrote {total} commits{:10}", "");
+            }
+        }
+    })?;
     println!(
         "gitenv: rewrote the unpushed commits from {} on and applied profile '{}'; \
          the old ones are in `git reflog`",
@@ -910,6 +982,99 @@ mod tests {
             git(&dir, &["log", "-1", "--format=%ae %ce"]),
             "ada@acme.example ada@acme.example"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unchosen_wrong_commit_keeps_its_author_and_committer() {
+        let dir = base("unchosen");
+        git(&dir, &["init", "-q"]);
+        commit(&dir, "ada@example.com", "mine");
+        git_env(
+            &dir,
+            &[
+                "-c",
+                "user.name=Bob",
+                "-c",
+                "user.email=bob@acme.example",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "pairing",
+            ],
+            &[("GIT_COMMITTER_DATE", "1700000000 +0000")],
+        );
+        commit(&dir, "ada@example.com", "mine again");
+        let repo = git::discover(&dir).unwrap().unwrap();
+        let planned = plan(&dir, &acme()).unwrap();
+        let chosen = [planned.wrong[0].hash.clone(), planned.wrong[2].hash.clone()];
+        rewrite_chosen(&repo, &acme(), &planned, &chosen, &mut |_, _| {}).unwrap();
+        assert_eq!(
+            git(&dir, &["log", "--format=%ae %ce %s"]),
+            "ada@acme.example ada@acme.example mine again\n\
+             bob@acme.example bob@acme.example pairing\n\
+             ada@acme.example ada@acme.example mine"
+        );
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%ct", "HEAD~1"]),
+            "1700000000"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rewriting_starts_at_the_first_chosen_commit() {
+        let dir = base("start");
+        git(&dir, &["init", "-q"]);
+        commit(&dir, "ada@example.com", "left alone");
+        commit(&dir, "ada@example.com", "fixed");
+        let first = git(&dir, &["rev-parse", "HEAD~1"]);
+        let repo = git::discover(&dir).unwrap().unwrap();
+        let planned = plan(&dir, &acme()).unwrap();
+        let chosen = [planned.wrong[1].hash.clone()];
+        rewrite_chosen(&repo, &acme(), &planned, &chosen, &mut |_, _| {}).unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "HEAD~1"]), first);
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%ae"]),
+            "ada@acme.example"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn choosing_nothing_changes_nothing() {
+        let dir = base("nothing");
+        git(&dir, &["init", "-q"]);
+        commit(&dir, "ada@example.com", "wrong");
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        let repo = git::discover(&dir).unwrap().unwrap();
+        let planned = plan(&dir, &acme()).unwrap();
+        rewrite_chosen(&repo, &acme(), &planned, &[], &mut |_, _| {}).unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), head);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pushed_commits_by_someone_else_are_listed_but_not_planned() {
+        let dir = base("pushedwrong");
+        let remote = dir.join("remote.git");
+        let work = dir.join("work");
+        git(&dir, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        git(&dir, &["init", "-q", work.to_str().unwrap()]);
+        git(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        commit(&work, "ada@example.com", "pushed wrong");
+        commit(&work, "ada@acme.example", "pushed right");
+        git(&work, &["push", "-q", "origin", "HEAD:main"]);
+        git(&work, &["fetch", "-q"]);
+        commit(&work, "ada@example.com", "unpushed wrong");
+        let planned = plan(&work, &acme()).unwrap();
+        let subjects = |c: &[Commit]| c.iter().map(|c| c.subject.clone()).collect::<Vec<_>>();
+        assert_eq!(subjects(&planned.wrong), ["unpushed wrong"]);
+        assert_eq!(subjects(&planned.pushed_wrong), ["pushed wrong"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

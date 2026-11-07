@@ -106,6 +106,7 @@ someone else.
 | `d` | delete the selected profile (asks first) |
 | `r` | re-read the repo and the profiles file |
 | `s` | list every repository next to this one |
+| `f` | re-author unpushed commits made as someone else |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
 
@@ -118,6 +119,17 @@ In the form, `Tab`/`↓` and `Shift-Tab`/`↑` move between fields, `←` `→`
 `Home` `End` move within one, and `Ctrl-A`/`Ctrl-E`, `Ctrl-U`/`Ctrl-K`
 (delete to start or end) and `Ctrl-W` (delete the word before the cursor)
 work as in a shell.
+
+`f` lists this repository's unpushed commits, oldest first, with every one
+made as someone else ticked, plus any pushed ones among the last 20 that
+were, which are left alone. They are re-authored as the profile a rule
+claims the repository for, or else the highlighted one. `space` ticks or
+unticks a commit and `a` all of them; an unticked one, such as a commit a
+pair made, keeps its author and committer. `Enter` asks first, then
+rewrites as [`gitenv fix-authors`](#fixing-commits-made-as-someone-else)
+does and applies the profile. When the commits are signed, the screen is
+handed back while they are, so gpg or ssh can ask for a passphrase. If
+git is mid-rebase or the commits include a merge, the view says so instead.
 
 In the repository list (`s`), `Enter` applies the profile a rule claims for
 the highlighted repository, `o` opens it in the main view, `r` rescans and

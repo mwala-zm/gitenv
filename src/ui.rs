@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, Mode, ScanView};
+use crate::app::{App, FixView, Mode, ScanView};
 use crate::form::{Form, LABEL_WIDTH, LABELS};
 use crate::git::Repo;
 use crate::rules;
@@ -25,6 +25,14 @@ pub fn render(frame: &mut Frame, app: &App) {
         render_footer(frame, footer, app);
         return;
     }
+    if let Mode::FixAuthors(view) = &app.mode {
+        render_fix_authors(frame, body, app, view);
+        render_footer(frame, footer, app);
+        if view.confirming {
+            render_confirm_fix(frame, view);
+        }
+        return;
+    }
 
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(body);
@@ -38,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         Mode::Help => render_help(frame),
         Mode::Edit(form) => render_form(frame, form),
         Mode::ConfirmDelete => render_confirm_delete(frame, app),
-        Mode::Scan(_) => {}
+        Mode::Scan(_) | Mode::FixAuthors(_) => {}
     }
 }
 
@@ -92,6 +100,160 @@ fn render_scan(frame: &mut Frame, area: Rect, view: &ScanView) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn short_hash(hash: &str) -> &str {
+    &hash[..10.min(hash.len())]
+}
+
+fn commit_line(hash: &str, email: &str, subject: &str, width: usize) -> Vec<Span<'static>> {
+    vec![
+        Span::raw(format!("{}  ", short_hash(hash))),
+        Span::raw(format!("{email:<width$}  ")),
+        Span::raw(subject.to_string()),
+    ]
+}
+
+/// The unpushed commits, oldest first as they are rewritten, with a tick box
+/// on each one made as someone else, then the pushed ones made as someone
+/// else, which are left alone.
+fn render_fix_authors(frame: &mut Frame, area: Rect, app: &App, view: &FixView) {
+    let repo = app
+        .repo
+        .as_ref()
+        .map(|r| scan::tildify(&r.root))
+        .unwrap_or_default();
+    let branch = view.plan.branch().unwrap_or("detached HEAD");
+    let title = format!(" Fix authors · {repo} · {branch} ");
+    let width = view
+        .plan
+        .unpushed
+        .iter()
+        .chain(&view.plan.pushed_wrong)
+        .map(|c| c.email.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let [head, list_area, summary] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(Block::bordered().inner(area));
+    frame.render_widget(Block::bordered().title(title), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            "Re-author as ".into(),
+            view.profile.name.clone().bold(),
+            format!(": {} <{}>", view.profile.user_name, view.profile.email).into(),
+            format!("  ({})", view.why).dim(),
+        ])),
+        head,
+    );
+
+    let mut items = Vec::new();
+    let mut selected = None;
+    let mut wrong = 0;
+    for commit in &view.plan.unpushed {
+        let is_wrong = view.plan.wrong.iter().any(|w| w.hash == commit.hash);
+        let email = if is_wrong && commit.email.eq_ignore_ascii_case(&view.profile.email) {
+            format!("{} (committer)", commit.committer_email)
+        } else {
+            commit.email.clone()
+        };
+        let mut spans = if is_wrong {
+            let ticked = view.ticked.get(wrong).copied().unwrap_or(false);
+            if wrong == view.cursor {
+                selected = Some(items.len());
+            }
+            wrong += 1;
+            vec![if ticked {
+                "[x] ".green()
+            } else {
+                "[ ] ".into()
+            }]
+        } else {
+            vec!["    ".into()]
+        };
+        let line = commit_line(&commit.hash, &email, &commit.subject, width);
+        if is_wrong {
+            spans.extend(line.into_iter().map(|s| s.yellow()));
+        } else {
+            spans.extend(line.into_iter().map(|s| s.dim()));
+        }
+        items.push(ListItem::new(Line::from(spans)));
+    }
+    if !view.plan.pushed_wrong.is_empty() {
+        items.push(ListItem::new(Line::from("")));
+        items.push(ListItem::new(Line::from(
+            "── already pushed, left alone ──".dim(),
+        )));
+        for commit in &view.plan.pushed_wrong {
+            let mut spans = vec![Span::raw("    ")];
+            spans.extend(
+                commit_line(&commit.hash, &commit.email, &commit.subject, width)
+                    .into_iter()
+                    .map(|s| s.dim()),
+            );
+            items.push(ListItem::new(Line::from(spans)));
+        }
+    }
+    let list = List::new(items)
+        .highlight_style(
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::DarkGray),
+        )
+        .highlight_symbol("> ");
+    let mut state = ListState::default();
+    state.select(selected);
+    frame.render_stateful_widget(list, list_area, &mut state);
+
+    let line = match &view.blocked {
+        Some(why) => Line::from(vec!["Cannot rewrite: ".red().bold(), why.clone().red()]),
+        None => {
+            let ticked = view.ticked.iter().filter(|t| **t).count();
+            let extra = view.rebuilt().saturating_sub(ticked);
+            Line::from(
+                format!(
+                    "{ticked} re-authored · {extra} more get new hashes · old ones stay in git reflog"
+                )
+                .dim(),
+            )
+        }
+    };
+    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: true }), summary);
+}
+
+fn render_confirm_fix(frame: &mut Frame, view: &FixView) {
+    let ticked = view.ticked.iter().filter(|t| **t).count();
+    let branch = view.plan.branch().unwrap_or("detached HEAD");
+    let mut lines = vec![
+        Line::from(format!("Rewrite {} commit(s) on {branch}?", view.rebuilt()).bold()),
+        Line::from(""),
+        Line::from(format!("{ticked} get '{}' as author.", view.profile.name).dim()),
+        Line::from("The old commits stay in git reflog.".dim()),
+    ];
+    if view.signs {
+        lines.push(Line::from(
+            "They are signed, so you may be asked for a passphrase.".dim(),
+        ));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from(vec![
+            " y / Enter ".bold(),
+            "rewrite   ".dim(),
+            " any other key ".bold(),
+            "cancel".dim(),
+        ]),
+    ]);
+    let area = centered(frame.area(), 60, lines.len() as u16 + 2);
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Fix authors ")),
+        area,
+    );
+}
+
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -108,6 +270,7 @@ fn render_help(frame: &mut Frame) {
         ("n", "create a new profile"),
         ("d", "delete the selected profile"),
         ("r", "re-read the repo and the profiles file"),
+        ("f", "re-author unpushed commits made as someone else"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -510,6 +673,20 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             " q ".bold(),
             "quit".dim(),
         ]),
+        None if matches!(app.mode, Mode::FixAuthors(_)) => Line::from(vec![
+            " ↑↓/jk ".bold(),
+            "select  ".dim(),
+            " space ".bold(),
+            "tick  ".dim(),
+            " a ".bold(),
+            "all/none  ".dim(),
+            " Enter ".bold(),
+            "rewrite  ".dim(),
+            " Esc ".bold(),
+            "back  ".dim(),
+            " q ".bold(),
+            "quit".dim(),
+        ]),
         None => Line::from(vec![
             " ↑↓/jk ".bold(),
             "select  ".dim(),
@@ -521,6 +698,8 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "new  ".dim(),
             " d ".bold(),
             "delete  ".dim(),
+            " f ".bold(),
+            "authors  ".dim(),
             " ? ".bold(),
             "help  ".dim(),
             " q ".bold(),
@@ -593,6 +772,7 @@ mod tests {
             should_quit: false,
             scan_root: "/home/ada/work".into(),
             config_text: None,
+            pending: None,
         }
     }
 
@@ -652,6 +832,62 @@ mod tests {
     fn confirm_delete_popup() {
         let mut app = app(profiles(), Some(repo()));
         app.mode = Mode::ConfirmDelete;
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    fn fix_view() -> crate::app::FixView {
+        use crate::fix::{Commit, Plan};
+        let commit = |hash: &str, email: &str, subject: &str| Commit {
+            hash: hash.repeat(40),
+            author: "Ada Lovelace".into(),
+            email: email.into(),
+            committer: "Ada Lovelace".into(),
+            committer_email: email.into(),
+            subject: subject.into(),
+            parents: 1,
+        };
+        let unpushed = vec![
+            commit("3", "ada@example.com", "Add login form"),
+            commit("8", "ada@example.com", "Fix typo in header"),
+            commit("9", "bob@acme.example", "Pair session: tests"),
+            commit("5", "ada@acme.example", "Bump deps"),
+        ];
+        let wrong = unpushed[..3].to_vec();
+        let pushed = vec![commit("a", "ada@example.com", "Initial commit")];
+        crate::app::FixView {
+            profile: profiles()[1].clone(),
+            why: "rule: remote matches github.com/acme/*".into(),
+            plan: Plan::for_test(unpushed, wrong, pushed),
+            ticked: vec![true, true, false],
+            cursor: 2,
+            blocked: None,
+            signs: true,
+            confirming: false,
+        }
+    }
+
+    #[test]
+    fn fix_authors_view() {
+        let mut app = app(profiles(), Some(repo()));
+        app.mode = Mode::FixAuthors(Box::new(fix_view()));
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn fix_authors_confirm_popup() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut view = fix_view();
+        view.confirming = true;
+        app.mode = Mode::FixAuthors(Box::new(view));
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn fix_authors_blocked() {
+        let mut app = app(profiles(), Some(repo()));
+        let mut view = fix_view();
+        view.blocked = Some("git is in the middle of a rebase; finish or abort it first".into());
+        app.mode = Mode::FixAuthors(Box::new(view));
         insta::assert_snapshot!(draw(&app));
     }
 
