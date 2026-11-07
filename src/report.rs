@@ -138,7 +138,9 @@ fn parse(text: &str) -> Vec<Commit> {
         .collect()
 }
 
-fn groups<'a>(
+/// The repositories grouped by the profile each belongs to, in the order
+/// of the profiles, those that belong to none last; empty groups dropped.
+pub fn groups<'a>(
     config: &Config,
     reports: &'a [RepoReport],
 ) -> Vec<(Option<String>, Vec<&'a RepoReport>)> {
@@ -157,7 +159,7 @@ fn groups<'a>(
     out
 }
 
-fn plural(n: usize, word: &str) -> String {
+pub fn plural(n: usize, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
@@ -207,6 +209,85 @@ pub fn render(config: &Config, reports: &[RepoReport], opts: &Options) -> String
     }
     out.push(summary);
     out.join("\n")
+}
+
+/// A period the TUI's report covers, as git's --since and --until take it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Period {
+    pub label: String,
+    pub since: String,
+    pub until: Option<String>,
+}
+
+/// The periods to step through: the last 7 and 30 days, this calendar
+/// month and the one before, the months taken from `today`.
+pub fn periods(today: (i64, u32, u32)) -> Vec<Period> {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let (year, month, _) = today;
+    let (last_year, last_month) = if month == 1 {
+        (year - 1, 12)
+    } else {
+        (year, month - 1)
+    };
+    let start = |y: i64, m: u32| format!("{y}-{m:02}-01 00:00");
+    vec![
+        Period {
+            label: "the last 7 days".into(),
+            since: "7 days ago".into(),
+            until: None,
+        },
+        Period {
+            label: "the last 30 days".into(),
+            since: "30 days ago".into(),
+            until: None,
+        },
+        Period {
+            label: format!("{} {year}", MONTHS[month as usize - 1]),
+            since: start(year, month),
+            until: None,
+        },
+        Period {
+            label: format!("{} {last_year}", MONTHS[last_month as usize - 1]),
+            since: start(last_year, last_month),
+            until: Some(start(year, month)),
+        },
+    ]
+}
+
+/// Today's date in UTC as year, month and day, from the system clock.
+pub fn today() -> (i64, u32, u32) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    civil(secs.div_euclid(86_400))
+}
+
+/// The calendar date `days` after 1970-01-01, by Howard Hinnant's
+/// days-to-civil algorithm.
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
 }
 
 /// One row per commit, for a spreadsheet or an invoicing script. Fields that
@@ -384,5 +465,23 @@ mod tests {
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].subject, "Add\tlogin");
         assert_eq!(commits[0].hash, "abc1234");
+    }
+
+    #[test]
+    fn days_since_the_epoch_become_dates() {
+        assert_eq!(civil(0), (1970, 1, 1));
+        assert_eq!(civil(11_016), (2000, 2, 29));
+        assert_eq!(civil(20_764), (2026, 11, 7));
+        assert_eq!(civil(-1), (1969, 12, 31));
+    }
+
+    #[test]
+    fn last_month_wraps_into_the_year_before() {
+        let p = periods((2026, 1, 15));
+        assert_eq!(p[2].label, "January 2026");
+        assert_eq!(p[2].since, "2026-01-01 00:00");
+        assert_eq!(p[3].label, "December 2025");
+        assert_eq!(p[3].since, "2025-12-01 00:00");
+        assert_eq!(p[3].until.as_deref(), Some("2026-01-01 00:00"));
     }
 }

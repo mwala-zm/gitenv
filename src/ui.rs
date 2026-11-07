@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap}
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, CloneChoice, CloneView, DoctorView, FixView, Mode, ScanView, Setup, SetupAction,
+    App, CloneChoice, CloneView, DoctorView, FixView, Mode, ReportView, ScanView, Setup,
+    SetupAction,
 };
 use crate::doctor::Level;
 use crate::export::Includes;
@@ -88,6 +89,11 @@ fn draw(frame: &mut Frame, app: &App) {
         }
         return;
     }
+    if let Mode::Report(view) = &app.mode {
+        render_report(frame, body, app, view);
+        render_footer(frame, footer, app);
+        return;
+    }
     if let Mode::FixAuthors(view) = &app.mode {
         render_fix_authors(frame, body, app, view);
         render_footer(frame, footer, app);
@@ -110,7 +116,7 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::ConfirmSetup(action) => render_confirm_setup(frame, *action, app),
         Mode::Why => render_why(frame, app),
         Mode::Clone(view) => render_clone(frame, view, app),
-        Mode::Scan(_) | Mode::FixAuthors(_) => {}
+        Mode::Scan(_) | Mode::FixAuthors(_) | Mode::Report(_) => {}
     }
 }
 
@@ -402,6 +408,97 @@ fn short_path(path: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
+/// Your commits in the period, a bar and a count per profile and the
+/// repositories under each, marking commits made as another identity.
+fn render_report(frame: &mut Frame, area: Rect, app: &App, view: &ReportView) {
+    use crate::report::{groups, plural};
+    let period = &view.periods[view.period];
+    let title = format!(
+        " Your commits in {} under {} ",
+        period.label,
+        scan::tildify(&view.root)
+    );
+    let groups = groups(&app.config, &view.reports);
+    let totals: Vec<usize> = groups
+        .iter()
+        .map(|(_, members)| members.iter().map(|r| r.commits.len()).sum())
+        .collect();
+    let most = totals.iter().copied().max().unwrap_or(0).max(1);
+    let name_width = groups
+        .iter()
+        .map(|(name, _)| name.as_deref().unwrap_or("(no profile)").chars().count())
+        .max()
+        .unwrap_or(0);
+    const BAR: usize = 30;
+    let mut lines = Vec::new();
+    let mut slips_total = 0;
+    for ((name, members), total) in groups.iter().zip(&totals) {
+        let profile = name
+            .as_deref()
+            .and_then(|n| app.config.profiles.iter().find(|p| p.name == n));
+        let filled = (BAR * total).div_ceil(most).max(1);
+        lines.push(Line::from(vec![
+            format!(
+                "{:<name_width$}  ",
+                name.as_deref().unwrap_or("(no profile)")
+            )
+            .bold(),
+            "█".repeat(filled).cyan(),
+            " ".repeat(BAR - filled + 1).into(),
+            plural(*total, "commit").into(),
+        ]));
+        for report in members {
+            let path = match report.root.strip_prefix(&view.root) {
+                Ok(rel) if !rel.as_os_str().is_empty() => rel.display().to_string(),
+                _ => scan::tildify(&report.root),
+            };
+            let mut spans = vec![
+                Span::raw(format!("    {path:<width$} ", width = name_width + BAR - 2)),
+                Span::raw(format!("{:>4}", report.commits.len())),
+            ];
+            if let Some(profile) = profile {
+                let mut others: Vec<&str> = report
+                    .commits
+                    .iter()
+                    .filter(|c| !c.email.eq_ignore_ascii_case(&profile.email))
+                    .map(|c| c.email.as_str())
+                    .collect();
+                let slips = others.len();
+                others.sort_unstable();
+                others.dedup();
+                if slips > 0 {
+                    slips_total += slips;
+                    spans.push(format!("  {slips} as {}", others.join(", ")).yellow());
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(""));
+    }
+    if view.reports.is_empty() {
+        lines.push(Line::from(
+            format!("No commits of yours in {}.", period.label).dim(),
+        ));
+    } else {
+        let total: usize = totals.iter().sum();
+        let mut summary = format!(
+            "{} in {}",
+            plural(total, "commit"),
+            plural(view.reports.len(), "repository").replace("repositorys", "repositories")
+        );
+        if slips_total > 0 {
+            summary.push_str(&format!("; {slips_total} made as another identity"));
+        }
+        lines.push(Line::from(summary.dim()));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((view.scroll, 0))
+            .block(Block::bordered().title(title)),
+        area,
+    );
+}
+
 /// The clone dialog: the URL, where it goes, and the profile it will get,
 /// which follows the URL's remote rules until another is picked.
 fn render_clone(frame: &mut Frame, view: &CloneView, app: &App) {
@@ -625,6 +722,7 @@ fn render_help(frame: &mut Frame) {
         ("I", "let git apply your rules by itself"),
         ("w", "why this repo belongs to the profile it does"),
         ("c", "clone a repository onto the right profile"),
+        ("R", "your commits by profile, this month and others"),
         ("s", "list every repository next to this one"),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
@@ -1290,6 +1388,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             " Esc ".bold(),
             "back".dim(),
         ]),
+        None if matches!(app.mode, Mode::Report(_)) => Line::from(vec![
+            " Tab/←→ ".bold(),
+            "period  ".dim(),
+            " ↑↓/jk ".bold(),
+            "scroll  ".dim(),
+            " Esc ".bold(),
+            "back  ".dim(),
+            " q ".bold(),
+            "quit".dim(),
+        ]),
         None if matches!(app.mode, Mode::FixAuthors(_)) => Line::from(vec![
             " ↑↓/jk ".bold(),
             "select  ".dim(),
@@ -1650,6 +1758,39 @@ mod tests {
         view.url = "git@github.com:acme/web.git".into();
         view.dir = "~/work/web".into();
         app.mode = Mode::Clone(Box::new(view));
+        insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn report_view_bars_and_slips() {
+        use crate::report::{Commit, RepoReport, periods};
+        let commit = |email: &str| Commit {
+            date: "2026-11-02".into(),
+            hash: "abc1234".into(),
+            email: email.into(),
+            subject: "work".into(),
+        };
+        let report = |path: &str, profile: &str, emails: &[&str]| RepoReport {
+            root: format!("/home/ada/work/{path}").into(),
+            profile: Some(profile.into()),
+            commits: emails.iter().map(|e| commit(e)).collect(),
+        };
+        let mut app = app(profiles(), Some(repo()));
+        app.mode = Mode::Report(Box::new(crate::app::ReportView {
+            root: "/home/ada/work".into(),
+            periods: periods((2026, 11, 7)),
+            period: 2,
+            reports: vec![
+                report("acme/api", "acme", &["ada@acme.example"; 12]),
+                report(
+                    "acme/web",
+                    "acme",
+                    &["ada@acme.example", "ada@example.com", "ada@example.com"],
+                ),
+                report("toy", "personal", &["ada@example.com"; 4]),
+            ],
+            scroll: 0,
+        }));
         insta::assert_snapshot!(draw(&app));
     }
 

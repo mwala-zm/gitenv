@@ -30,6 +30,16 @@ pub enum Mode {
     ConfirmSetup(SetupAction),
     Why,
     Clone(Box<CloneView>),
+    Report(Box<ReportView>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportView {
+    pub root: PathBuf,
+    pub periods: Vec<crate::report::Period>,
+    pub period: usize,
+    pub reports: Vec<crate::report::RepoReport>,
+    pub scroll: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +497,7 @@ impl App {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Help | Mode::Why => self.mode = Mode::Normal,
             Mode::Clone(_) => self.handle_clone_key(key),
+            Mode::Report(_) => self.handle_report_key(key),
             Mode::Edit(_) => self.handle_edit_key(key),
             Mode::ConfirmDelete => self.handle_confirm_delete_key(key),
             Mode::Scan(_) => self.handle_scan_key(key),
@@ -526,6 +537,7 @@ impl App {
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('D'), _) => self.open_doctor(),
             (KeyCode::Char('u'), _) => self.undo(),
+            (KeyCode::Char('R'), _) => self.open_report(1),
             (KeyCode::Char('c'), m) if !m.contains(KeyModifiers::CONTROL) => {
                 self.mode = Mode::Clone(Box::new(CloneView::new(self.scan_root.clone())));
             }
@@ -1390,6 +1402,55 @@ impl App {
         applied
     }
 
+    /// Collects your commits under the folder next to this repository over
+    /// period `period`, and shows them by profile.
+    fn open_report(&mut self, period: usize) {
+        let periods = crate::report::periods(crate::report::today());
+        let period = period.min(periods.len() - 1);
+        let opts = crate::report::Options {
+            since: periods[period].since.clone(),
+            until: periods[period].until.clone(),
+            csv: false,
+        };
+        let root = self.scan_root.clone();
+        let (reports, _) = crate::report::collect(&self.config, &root, &opts);
+        self.mode = Mode::Report(Box::new(ReportView {
+            root,
+            periods,
+            period,
+            reports,
+            scroll: 0,
+        }));
+    }
+
+    fn handle_report_key(&mut self, key: KeyEvent) {
+        let Mode::Report(view) = &mut self.mode else {
+            return;
+        };
+        let count = view.periods.len();
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
+                self.should_quit = true
+            }
+            (KeyCode::Esc, _) | (KeyCode::Char('R'), _) => self.mode = Mode::Normal,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+                view.scroll = view.scroll.saturating_add(1)
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+                view.scroll = view.scroll.saturating_sub(1)
+            }
+            (KeyCode::Tab, _) | (KeyCode::Right, _) => {
+                let next = (view.period + 1) % count;
+                self.open_report(next);
+            }
+            (KeyCode::BackTab, _) | (KeyCode::Left, _) => {
+                let next = (view.period + count - 1) % count;
+                self.open_report(next);
+            }
+            _ => {}
+        }
+    }
+
     /// Puts back the config files the last apply or fix changed, each only
     /// if it still holds what gitenv left, so a change made since is never
     /// lost. gh is not switched back.
@@ -2047,8 +2108,15 @@ mod tests {
         assert_eq!(view(&app).to_fix(), [2], "marks survive a rescan");
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
         assert_eq!(app.status.as_deref(), Some("Undid fixing 1 repository"));
-        assert_eq!(fix_git(&base.join("api"), &["config", "user.email"]), "ada@example.com");
-        assert_eq!(view(&app).rows[0].status_word(), "wrong", "the list is read again");
+        assert_eq!(
+            fix_git(&base.join("api"), &["config", "user.email"]),
+            "ada@example.com"
+        );
+        assert_eq!(
+            view(&app).rows[0].status_word(),
+            "wrong",
+            "the list is read again"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2278,5 +2346,34 @@ mod tests {
         assert_eq!(fix_git(&dir, &["config", "user.email"]), "ada@acme.example");
         assert_eq!(fix_git(&dir, &["config", "pull.rebase"]), "true");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shift_r_reports_your_commits_and_tab_changes_the_period() {
+        let base = std::env::temp_dir().join(format!("gitenv-app-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let api = base.join("api");
+        std::fs::create_dir_all(&api).unwrap();
+        fix_git(&api, &["init", "-q"]);
+        fix_git(&api, &["config", "--local", "user.name", "Ada"]);
+        fix_commit(&api, "ada@example.com", "mine");
+        fix_commit(&api, "bob@example.com", "not mine");
+        let mut app = app_with("report", vec![profile("personal")]);
+        app.scan_root = base.clone();
+        app.handle_key(KeyEvent::from(KeyCode::Char('R')));
+        let Mode::Report(view) = &app.mode else {
+            panic!("R should open the report: {:?}", app.status);
+        };
+        assert_eq!(view.periods[view.period].label, "the last 30 days");
+        assert_eq!(view.reports.len(), 1);
+        assert_eq!(view.reports[0].commits.len(), 1, "only your commits count");
+        app.handle_key(KeyEvent::from(KeyCode::Tab));
+        let Mode::Report(view) = &app.mode else {
+            panic!()
+        };
+        assert_eq!(view.period, 2);
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

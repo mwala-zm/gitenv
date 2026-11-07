@@ -122,6 +122,7 @@ someone else.
 | `r` | re-read the repo and the profiles file |
 | `w` | why this repo belongs to the profile it does |
 | `c` | clone a repository onto the right profile |
+| `R` | your commits by profile, as `gitenv report` lists them |
 | `s` | list every repository next to this one |
 | `f` | re-author unpushed commits made as someone else |
 | `/` | filter the list (`Enter` keeps the filter, `Esc` clears it) |
@@ -150,6 +151,12 @@ another profile or none. While git clones, the screen is handed back so it
 can ask for a password or to trust a host; if the clone fails, git's
 message stays until you press `Enter`. The new clone then opens in the
 main view.
+
+`R` shows [`gitenv report`](#command-line) for the folder next to this
+repository: a bar and a count of your commits per profile, the
+repositories under each, and how many commits in each were made as
+another identity. `Tab` steps through the last 7 and 30 days, this month
+and last month (calendar months by the UTC date).
 
 `N` starts a new profile from what git uses here: the name, email and
 signing settings, the ssh key an `ssh -i` core.sshCommand offers, and a
