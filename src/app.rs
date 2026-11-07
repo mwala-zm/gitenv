@@ -391,6 +391,13 @@ impl App {
             (KeyCode::Char('I'), _) => self.ask_setup(SetupAction::Includes),
             (KeyCode::Char('?'), _) | (KeyCode::Char('h'), _) => self.mode = Mode::Help,
             (KeyCode::Char('n'), _) => self.mode = Mode::Edit(Box::new(Form::new())),
+            (KeyCode::Char('N'), _) => match &self.repo {
+                Some(repo) => self.mode = Mode::Edit(Box::new(Form::from_repo(repo))),
+                None => {
+                    self.status =
+                        Some("Not inside a git repository; press n for an empty profile".into())
+                }
+            },
             (KeyCode::Char('e'), _) => {
                 if let Some(profile) = self.selected_profile() {
                     self.mode = Mode::Edit(Box::new(Form::edit(self.selected, profile)));
@@ -1727,5 +1734,45 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('n')));
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(app.status.as_deref(), Some("Nothing was changed"));
+    }
+
+    #[test]
+    fn shift_n_starts_a_profile_from_the_repo() {
+        let mut app = app_with("fromrepo", vec![profile("personal")]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('N')));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Not inside a git repository")
+        );
+
+        let dir = fix_repo("fromrepo");
+        fix_git(
+            &dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://gitlab.com/Client/site.git",
+            ],
+        );
+        fix_git(
+            &dir,
+            &["config", "--local", "user.email", "ada@client.example"],
+        );
+        app.repo = git::discover(&dir).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('N')));
+        let Mode::Edit(form) = &app.mode else {
+            panic!("N should open the form: {:?}", app.status);
+        };
+        assert_eq!(form.values[0], "client");
+        assert_eq!(form.values[2], "ada@client.example");
+        assert_eq!(form.values[8], "gitlab.com/client/*");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal), "{:?}", app.status);
+        assert_eq!(app.active_profile().unwrap().name, "client");
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_file(&app.config_path).ok();
     }
 }

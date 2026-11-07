@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::git::{self, git_bool};
+use crate::git::{self, Repo, git_bool};
 use crate::profile::{Profile, SigningFormat};
 use crate::rules;
 
@@ -69,6 +69,60 @@ impl Form {
             cursor: profile.name.chars().count(),
             editing: Some(index),
             error: None,
+        }
+    }
+
+    /// A new profile taken from what git uses in `repo`: its name, email and
+    /// signing settings, the ssh key an `ssh -i` core.sshCommand offers, and a
+    /// remote rule for every repository of the same owner, or a path rule for
+    /// this folder when it has no remote. It is named after the owner, or the
+    /// folder.
+    pub fn from_repo(repo: &Repo) -> Self {
+        let id = &repo.effective;
+        let host_path = repo.remote.as_deref().map(rules::remote_host_path);
+        let owner = host_path
+            .as_deref()
+            .and_then(|hp| hp.split('/').nth(1))
+            .filter(|o| !o.is_empty())
+            .map(str::to_ascii_lowercase);
+        let folder = repo
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let rule = match (&host_path, &owner) {
+            (Some(hp), Some(owner)) => {
+                let host = hp.split('/').next().unwrap_or_default();
+                (format!("{host}/{owner}/*"), String::new())
+            }
+            _ => (String::new(), crate::scan::tildify(&repo.root)),
+        };
+        let name = owner.unwrap_or(folder);
+        let mut values: [String; 11] = Default::default();
+        values[0] = name;
+        values[1] = id.name.clone().unwrap_or_default();
+        values[2] = id.email.clone().unwrap_or_default();
+        values[3] = id.signing_key.clone().unwrap_or_default();
+        values[4] = id
+            .signing_format
+            .map(|f| f.as_git().to_string())
+            .unwrap_or_default();
+        values[5] = id
+            .sign_commits
+            .map(|s| if s { "yes" } else { "no" }.to_string())
+            .unwrap_or_default();
+        values[6] = id
+            .ssh_command
+            .as_deref()
+            .and_then(ssh_key_of)
+            .map(|k| crate::scan::tildify(Path::new(&k)))
+            .unwrap_or_default();
+        values[8] = rule.0;
+        values[9] = rule.1;
+        Self {
+            cursor: values[0].chars().count(),
+            values,
+            ..Self::default()
         }
     }
 
@@ -246,6 +300,66 @@ impl Form {
             paths,
         })
     }
+}
+
+/// The key an `ssh -i KEY ...` command offers, unquoting it as a shell
+/// would, so the command gitenv writes for a profile reads back as its key.
+fn ssh_key_of(command: &str) -> Option<String> {
+    let words = shell_words(command);
+    let mut words = words.iter();
+    if !words
+        .next()
+        .is_some_and(|w| w == "ssh" || w.ends_with("/ssh"))
+    {
+        return None;
+    }
+    while let Some(word) = words.next() {
+        if word == "-i" {
+            return words.next().cloned();
+        }
+        if let Some(key) = word.strip_prefix("-i").filter(|k| !k.is_empty()) {
+            return Some(key.to_string());
+        }
+    }
+    None
+}
+
+fn shell_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            ' ' | '\t' => {
+                if let Some(w) = word.take() {
+                    words.push(w);
+                }
+            }
+            '\'' => {
+                let w = word.get_or_insert_with(String::new);
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    w.push(q);
+                }
+            }
+            '"' => {
+                let w = word.get_or_insert_with(String::new);
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => w.extend(chars.next()),
+                        _ => w.push(q),
+                    }
+                }
+            }
+            '\\' => word.get_or_insert_with(String::new).extend(chars.next()),
+            _ => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
+    words
 }
 
 fn split_paths(s: &str) -> Vec<String> {
@@ -466,5 +580,65 @@ mod tests {
             split_paths("~/Clients/Smith, Jones/**, /srv/x"),
             vec!["~/Clients/Smith, Jones/**", "/srv/x"]
         );
+    }
+
+    #[test]
+    fn the_ssh_key_reads_back_from_the_command_gitenv_writes() {
+        let key = Path::new("/home/ada/.ssh/id it's");
+        assert_eq!(
+            ssh_key_of(&git::ssh_command(key)).as_deref(),
+            Some("/home/ada/.ssh/id it's")
+        );
+        assert_eq!(
+            ssh_key_of("ssh -o IdentitiesOnly=yes -i \"/k/a b\"").as_deref(),
+            Some("/k/a b")
+        );
+        assert_eq!(ssh_key_of("/usr/bin/ssh -i/k/x").as_deref(), Some("/k/x"));
+        assert_eq!(ssh_key_of("ssh -o IdentitiesOnly=yes"), None);
+        assert_eq!(ssh_key_of("plink -i /k/x"), None);
+    }
+
+    fn repo(root: &str, remote: Option<&str>) -> Repo {
+        Repo {
+            root: root.into(),
+            remote: remote.map(String::from),
+            effective: git::Identity {
+                name: Some("Ada".into()),
+                email: Some("ada@acme.example".into()),
+                signing_key: Some("~/.ssh/id_acme.pub".into()),
+                signing_format: Some(SigningFormat::Ssh),
+                sign_commits: Some(true),
+                ssh_command: Some(git::ssh_command(Path::new("/keys/id_acme"))),
+                ..Default::default()
+            },
+            local: Default::default(),
+            authors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_profile_from_a_repo_takes_its_identity_and_owner() {
+        let form = Form::from_repo(&repo("/work/acme/api", Some("git@github.com:Acme/api.git")));
+        let p = form.to_profile().unwrap();
+        assert_eq!(p.name, "acme");
+        assert_eq!(
+            (p.user_name.as_str(), p.email.as_str()),
+            ("Ada", "ada@acme.example")
+        );
+        assert_eq!(p.signing_key.as_deref(), Some("~/.ssh/id_acme.pub"));
+        assert_eq!(p.signing_format, Some(SigningFormat::Ssh));
+        assert_eq!(p.sign_commits, Some(true));
+        assert_eq!(p.ssh_key, Some(PathBuf::from("/keys/id_acme")));
+        assert_eq!(p.remotes, ["github.com/acme/*"]);
+        assert!(p.paths.is_empty());
+        assert_eq!(form.editing, None);
+    }
+
+    #[test]
+    fn without_a_remote_the_folder_names_it_and_is_its_rule() {
+        let form = Form::from_repo(&repo("/work/scratch", None));
+        assert_eq!(form.values[0], "scratch");
+        assert_eq!(form.values[8], "");
+        assert_eq!(form.values[9], "/work/scratch");
     }
 }

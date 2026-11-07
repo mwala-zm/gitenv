@@ -116,6 +116,7 @@ someone else.
 | `Enter` | write the selected profile into this repo's config |
 | `e` | edit the selected profile |
 | `n` | create a new profile |
+| `N` | create a profile from this repo's identity and remote |
 | `d` | delete the selected profile (asks first) |
 | `r` | re-read the repo and the profiles file |
 | `s` | list every repository next to this one |
@@ -126,6 +127,12 @@ someone else.
 | `I` | let git apply your rules by itself (`gitenv export --install`) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
+
+`N` starts a new profile from what git uses here: the name, email and
+signing settings, the ssh key an `ssh -i` core.sshCommand offers, and a
+remote rule for everything of the same owner (`github.com/acme/*`), or a
+path rule for this folder when there is no remote. Check it, change what
+you like, and `Enter` saves it.
 
 When a rule claims the repository, its profile is selected on start, so
 `Enter` is the fix. Applying a profile writes `user.name`, `user.email` and

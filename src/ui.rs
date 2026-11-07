@@ -450,6 +450,7 @@ fn render_help(frame: &mut Frame) {
         ("Enter", "apply the selected profile to this repo"),
         ("e", "edit the selected profile"),
         ("n", "create a new profile"),
+        ("N", "create a profile from this repo's identity and remote"),
         ("d", "delete the selected profile"),
         ("r", "re-read the repo and the profiles file"),
         ("f", "re-author unpushed commits made as someone else"),
@@ -772,7 +773,11 @@ fn render_repo(frame: &mut Frame, area: Rect, app: &App) {
         (None, None) if app.config.profiles.is_empty() => {
             Line::from("no profiles configured".dim())
         }
-        (None, None) => Line::from(vec!["✘ ".red(), "does not match any profile".red().bold()]),
+        (None, None) => Line::from(vec![
+            "✘ ".red(),
+            "does not match any profile".red().bold(),
+            " · N makes one from it".dim(),
+        ]),
     };
     let rule_note = match &expected {
         Some((want, why)) => {
