@@ -612,6 +612,7 @@ fn render_help(frame: &mut Frame) {
     let rows = [
         ("↑ ↓  j k", "move between profiles"),
         ("Enter", "apply the selected profile to this repo"),
+        ("u", "undo the last apply or fix"),
         ("e", "edit the selected profile"),
         ("n", "create a new profile"),
         ("N", "create a profile from this repo's identity and remote"),

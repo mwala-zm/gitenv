@@ -114,6 +114,7 @@ someone else.
 |---|---|
 | `↑` `↓` or `j` `k` | move between profiles |
 | `Enter` | write the selected profile into this repo's config |
+| `u` | undo the last apply or fix |
 | `e` | edit the selected profile |
 | `n` | create a new profile |
 | `N` | create a profile from this repo's identity and remote |
@@ -129,6 +130,11 @@ someone else.
 | `I` | let git apply your rules by itself (`gitenv export --install`) |
 | `?` or `h` | show help |
 | `q` or `Esc` | quit |
+
+`u` undoes the last thing `Enter` or `F` applied, putting each
+repository's config back exactly as it was. A repository whose config
+changed again since is left alone and named, so nothing you did after is
+lost, and gh stays on the account the apply switched it to.
 
 `w` explains the choice: every rule that matches this repository, the one
 that claims it first, and for each of the others why it lost (a remote

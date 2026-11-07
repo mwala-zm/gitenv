@@ -56,6 +56,55 @@ pub struct DoctorView {
 
 pub type SshProbe = fn(&Path, &str) -> Result<String, String>;
 
+/// One repository's config file as it was before gitenv wrote to it, and as
+/// gitenv left it.
+#[derive(Debug, Clone)]
+pub struct Change {
+    pub root: PathBuf,
+    pub file: PathBuf,
+    pub before: String,
+    pub after: Option<String>,
+}
+
+impl Change {
+    /// Notes the config file `apply` writes, `git rev-parse --git-path config`,
+    /// which a linked worktree shares with its main repository.
+    fn before(root: &Path) -> Option<Self> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--git-path", "config"])
+            .output()
+            .ok()?;
+        let file = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let file = if file.is_absolute() {
+            file
+        } else {
+            root.join(file)
+        };
+        Some(Self {
+            root: root.to_path_buf(),
+            before: std::fs::read_to_string(&file).ok()?,
+            file,
+            after: None,
+        })
+    }
+
+    /// Notes what the file holds now; none when nothing changed.
+    fn after(mut self) -> Option<Self> {
+        self.after = std::fs::read_to_string(&self.file).ok();
+        (self.after.as_deref() != Some(self.before.as_str())).then_some(self)
+    }
+}
+
+/// The last thing gitenv applied, so `u` can put it back.
+#[derive(Debug, Clone)]
+pub struct Undo {
+    pub what: String,
+    pub changes: Vec<Change>,
+    pub gh: bool,
+}
+
 /// Work the main loop runs between frames, so it can hand the terminal
 /// back first when the work may ask for a passphrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +304,7 @@ pub struct App {
     pub ssh_probe: SshProbe,
     pub setup: Option<Setup>,
     pub known_repos: Option<Vec<Repo>>,
+    pub last_change: Option<Undo>,
 }
 
 impl App {
@@ -314,6 +364,7 @@ impl App {
             ssh_probe: doctor::ssh_probe,
             setup: None,
             known_repos: None,
+            last_change: None,
         };
         app.check_health();
         app.check_setup();
@@ -348,6 +399,7 @@ impl App {
             ssh_probe: |_, _| Err("no network in tests".into()),
             setup: None,
             known_repos: None,
+            last_change: None,
         }
     }
 
@@ -473,6 +525,7 @@ impl App {
             (KeyCode::Char('s'), _) => self.open_scan(),
             (KeyCode::Char('f'), _) => self.open_fix_authors(),
             (KeyCode::Char('D'), _) => self.open_doctor(),
+            (KeyCode::Char('u'), _) => self.undo(),
             (KeyCode::Char('c'), m) if !m.contains(KeyModifiers::CONTROL) => {
                 self.mode = Mode::Clone(Box::new(CloneView::new(self.scan_root.clone())));
             }
@@ -782,6 +835,10 @@ impl App {
                     view.marked[i] = !all;
                 }
             }
+            (KeyCode::Char('u'), _) => {
+                self.undo();
+                self.rescan();
+            }
             (KeyCode::Char('w'), _) => {
                 view.wrong_only = !view.wrong_only;
                 view.keep_selection_visible();
@@ -825,15 +882,16 @@ impl App {
                     return;
                 };
                 let repo = row.repo.clone();
-                self.status = Some(match rules::expected(&self.config, &repo) {
+                let claimed = rules::expected(&self.config, &repo).map(|(p, _)| p.clone());
+                self.status = Some(match claimed {
                     None => "No rule claims this repo; press o to open it and pick a profile"
                         .to_string(),
-                    Some((profile, _)) => match git::apply(&repo, profile) {
+                    Some(profile) => match self.apply_recorded(&repo, &profile) {
                         Ok(()) => format!(
                             "Applied profile '{}' to {}{}",
                             profile.name,
                             scan::tildify(&repo.root),
-                            cmd::gh_note(profile)
+                            cmd::gh_note(&profile)
                         ),
                         Err(err) => format!("Failed to apply: {err}"),
                     },
@@ -1140,8 +1198,12 @@ impl App {
         let todo = view.to_fix();
         let mut errors = Vec::new();
         let mut current = false;
+        let mut changes = Vec::new();
         for &i in &todo {
-            match scan::fix(&self.config, &mut view.rows[i]) {
+            let change = Change::before(&view.rows[i].repo.root);
+            let fixed = scan::fix(&self.config, &mut view.rows[i]);
+            changes.extend(change.and_then(Change::after));
+            match fixed {
                 Ok(()) => {
                     current |= self
                         .repo
@@ -1153,6 +1215,17 @@ impl App {
         }
         view.marked.fill(false);
         view.keep_selection_visible();
+        if !changes.is_empty() {
+            let n = changes.len();
+            self.last_change = Some(Undo {
+                what: format!(
+                    "fixing {n} {}",
+                    if n == 1 { "repository" } else { "repositories" }
+                ),
+                changes,
+                gh: false,
+            });
+        }
         let fixed = todo.len() - errors.len();
         let noun = |n: usize| if n == 1 { "repository" } else { "repositories" };
         self.status = Some(match errors.first() {
@@ -1298,6 +1371,58 @@ impl App {
         self.known_repos = Some(repos);
     }
 
+    /// Applies `profile` to `repo` and remembers the config file as it was,
+    /// for `u`, whenever the apply changed it, even if it then failed part way.
+    fn apply_recorded(&mut self, repo: &Repo, profile: &Profile) -> Result<()> {
+        let change = Change::before(&repo.root);
+        let applied = git::apply(repo, profile);
+        if let Some(change) = change.and_then(Change::after) {
+            self.last_change = Some(Undo {
+                what: format!(
+                    "applying '{}' to {}",
+                    profile.name,
+                    scan::tildify(&repo.root)
+                ),
+                changes: vec![change],
+                gh: profile.gh_account.is_some(),
+            });
+        }
+        applied
+    }
+
+    /// Puts back the config files the last apply or fix changed, each only
+    /// if it still holds what gitenv left, so a change made since is never
+    /// lost. gh is not switched back.
+    fn undo(&mut self) {
+        let Some(undo) = self.last_change.take() else {
+            self.status = Some("Nothing to undo".into());
+            return;
+        };
+        let mut kept = Vec::new();
+        let mut failed = Vec::new();
+        for change in &undo.changes {
+            let now = std::fs::read_to_string(&change.file).ok();
+            if now != change.after {
+                kept.push(scan::tildify(&change.root));
+            } else if let Err(err) = std::fs::write(&change.file, &change.before) {
+                failed.push(format!("{}: {err}", scan::tildify(&change.root)));
+            }
+        }
+        let mut status = format!("Undid {}", undo.what);
+        if !kept.is_empty() {
+            status.push_str(&format!("; left {} alone, changed since", kept.join(", ")));
+        }
+        if !failed.is_empty() {
+            status.push_str(&format!("; could not write {}", failed.join(", ")));
+        }
+        if undo.gh {
+            status.push_str("; gh stays on its current account");
+        }
+        self.status = Some(status);
+        self.refresh();
+        self.select_active();
+    }
+
     fn refresh_export(&self) -> String {
         match export::refresh(&self.config, &self.config_path) {
             Ok(true) => " and updated the git includes".into(),
@@ -1311,18 +1436,18 @@ impl App {
     }
 
     fn apply_selected(&mut self) {
-        let Some(repo) = &self.repo else {
+        let Some(repo) = self.repo.clone() else {
             self.status = Some("Not inside a git repository".into());
             return;
         };
-        let Some(profile) = self.selected_profile() else {
+        let Some(profile) = self.selected_profile().cloned() else {
             self.status = Some("No profile selected".into());
             return;
         };
-        match git::apply(repo, profile) {
+        match self.apply_recorded(&repo, &profile) {
             Ok(()) => {
-                let gh = cmd::gh_note(profile);
-                self.status = Some(match git::still_overridden(&repo.root, profile) {
+                let gh = cmd::gh_note(&profile);
+                self.status = Some(match git::still_overridden(&repo.root, &profile) {
                     Some(why) => format!("Applied profile '{}', but {why}{gh}", profile.name),
                     None => format!("Applied profile '{}' to this repo{gh}", profile.name),
                 });
@@ -1920,6 +2045,10 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('a')));
         app.handle_key(KeyEvent::from(KeyCode::Char('r')));
         assert_eq!(view(&app).to_fix(), [2], "marks survive a rescan");
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+        assert_eq!(app.status.as_deref(), Some("Undid fixing 1 repository"));
+        assert_eq!(fix_git(&base.join("api"), &["config", "user.email"]), "ada@example.com");
+        assert_eq!(view(&app).rows[0].status_word(), "wrong", "the list is read again");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2110,5 +2239,44 @@ mod tests {
             "ada@client.example"
         );
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn u_puts_back_the_config_the_last_apply_changed() {
+        let dir = fix_repo("undo");
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        let mut app = app_with("undo", vec![profile("personal"), acme]);
+        app.repo = git::discover(&dir).unwrap();
+        let config = dir.join(".git/config");
+        let before = std::fs::read_to_string(&config).unwrap();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+        assert_eq!(app.status.as_deref(), Some("Nothing to undo"));
+        app.selected = 1;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(fix_git(&dir, &["config", "user.email"]), "ada@acme.example");
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .starts_with("Undid applying 'acme'")
+        );
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+        assert_eq!(app.active_profile().unwrap().name, "personal");
+
+        app.selected = 1;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        fix_git(&dir, &["config", "--local", "pull.rebase", "true"]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('u')));
+        assert!(
+            app.status.as_deref().unwrap().contains("changed since"),
+            "{:?}",
+            app.status
+        );
+        assert_eq!(fix_git(&dir, &["config", "user.email"]), "ada@acme.example");
+        assert_eq!(fix_git(&dir, &["config", "pull.rebase"]), "true");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
