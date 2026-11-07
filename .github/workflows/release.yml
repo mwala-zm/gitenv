@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a tag like v0.1.0 builds binaries for each platform and attaches
-# them to a GitHub release together with .deb and .rpm packages, then fans
+# them to a GitHub release together with .deb and .rpm packages, with that
+# version's section of CHANGELOG.md as the release notes, then fans
 # out to the package managers: the Homebrew tap always, crates.io and the
 # AUR when their secrets are set. Archive names follow the convention that
 # cargo-binstall looks for, so `cargo binstall gitenv` works too.
@@ -55,6 +56,9 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
             exit 1
           fi
+      - name: Release notes from CHANGELOG.md
+        shell: bash
+        run: packaging/release-notes.sh "${GITHUB_REF_NAME#v}" > release-notes.md
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Package archive
         run: |
@@ -75,6 +79,7 @@ jobs:
           ls target/${{ matrix.target }}/debian target/${{ matrix.target }}/generate-rpm
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             gitenv-${{ matrix.target }}.tar.gz
             target/${{ matrix.target }}/debian/*.deb
