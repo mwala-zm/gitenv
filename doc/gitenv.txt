@@ -1,0 +1,122 @@
+*gitenv.txt*  Commit with the right git identity in every repository
+
+==============================================================================
+CONTENTS                                                     *gitenv-contents*
+
+  1. Introduction ........................................ |gitenv-intro|
+  2. Setup ............................................... |gitenv-setup|
+  3. Commands ............................................ |gitenv-commands|
+  4. Statusline .......................................... |gitenv-statusline|
+  5. Warnings ............................................ |gitenv-warnings|
+  6. Lua API ............................................. |gitenv-api|
+
+==============================================================================
+1. INTRODUCTION                                                 *gitenv-intro*
+
+The gitenv plugin brings gitenv into Neovim: its terminal UI in a floating
+window, the profile of the buffer's repository in your statusline, a warning
+when that repository is on the wrong profile, and commands that apply a
+profile or fix commits without leaving the editor.
+
+It needs Neovim 0.10 or newer and the `gitenv` binary on your PATH. Run
+`:checkhealth gitenv` to check both.
+
+==============================================================================
+2. SETUP                                                        *gitenv-setup*
+
+With lazy.nvim: >lua
+    { "mwala-zm/gitenv", opts = {} }
+<
+The commands and warnings work without calling setup. To change a default: >lua
+    require("gitenv").setup({
+      cmd = "gitenv",
+      warn = "notify",
+      max_age = 5,
+      float = { width = 0.85, height = 0.85, border = "rounded" },
+    })
+<
+`cmd`       The gitenv binary, a name on PATH or a full path.
+`warn`      `"notify"` shows a notification, `"prompt"` asks whether to
+            apply the rule's profile or open the TUI, `false` stays quiet.
+            See |gitenv-warnings|.
+`max_age`   Seconds a status is kept before entering a buffer reads it
+            again. Focusing Neovim and every gitenv command always read it.
+`float`     Size of the floating window as a fraction of the editor, and
+            its border.
+
+==============================================================================
+3. COMMANDS                                                  *gitenv-commands*
+
+:Gitenv [path]                                                       *:Gitenv*
+    Open the gitenv TUI in a floating window on the current buffer's
+    repository, or on [path]. Outside a repository it opens on the list of
+    repositories there. `q` closes it; changed buffers are reloaded.
+
+:GitenvApply [profile]                                          *:GitenvApply*
+    Write [profile] into the repository, or without one the profile whose
+    rules claim it. Profile names complete with <Tab>.
+
+:GitenvStatus                                                  *:GitenvStatus*
+    Show which identity git uses here, where it comes from, and whether it
+    is right.
+
+:GitenvFixAuthors                                          *:GitenvFixAuthors*
+    Re-author the unpushed commits made as someone else, in a floating
+    terminal that asks first and stays open to show what happened. For
+    ticking commits one by one, open |:Gitenv| and press `f` instead.
+
+==============================================================================
+4. STATUSLINE                                              *gitenv-statusline*
+
+`require("gitenv").statusline()` returns what `gitenv status --short` prints
+for the current buffer's repository: `acme` when all is well,
+`personal -> acme` when a rule names another profile, `?` when the identity
+matches no profile, and `!` when gitenv could not look. Outside a
+repository it is empty. It reads the cache only, so it never slows typing.
+
+lualine: >lua
+    sections = {
+      lualine_x = {
+        { require("gitenv").statusline, color = require("gitenv").color },
+      },
+    }
+<
+A plain 'statusline', coloured: >vim
+    set statusline+=%{%v:lua.require'gitenv'.statusline({'highlight':v:true})%}
+<
+                                         *GitenvOk* *GitenvWrong* *GitenvError*
+The colours are the highlight groups GitenvOk, GitenvWrong and GitenvError,
+linked to DiagnosticOk, DiagnosticWarn and DiagnosticError by default.
+
+                                                          *User_GitenvStatus*
+Each time a status is read, the `User GitenvStatus` autocommand fires with
+`data.root` and `data.status`, for statuslines that only redraw on demand.
+
+==============================================================================
+5. WARNINGS                                                  *gitenv-warnings*
+
+When you enter a buffer in a repository that is on the wrong profile, or
+whose identity matches none, gitenv says so once. It says so again only if
+the situation changes, and not at all once the repository is right. When
+the profiles file cannot be read, which makes the commit hooks refuse
+every commit, the warning is an error.
+
+==============================================================================
+6. LUA API                                                        *gitenv-api*
+
+All in `require("gitenv")`:
+
+`setup(opts)`             Change the defaults, see |gitenv-setup|.
+`status()`                The cached status table, with `token`, `code`
+                          (0 right, 1 wrong, 2 could not look), `actual`,
+                          `expected` and `error`, or nil.
+`statusline(opts)`        See |gitenv-statusline|.
+`color()`                 The highlight group for the current status.
+`refresh(root, opts)`     Read the status again; `{ force = true }` skips
+                          `max_age`.
+`root(buf)`               The repository root for a buffer.
+`open(path)`              Same as |:Gitenv|.
+`apply(name, root)`       Same as |:GitenvApply|.
+`fix_authors(root)`       Same as |:GitenvFixAuthors|.
+
+ vim:tw=78:ts=8:ft=help:norl:

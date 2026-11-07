@@ -154,6 +154,36 @@ has to start a word or follow the one before, so `acm` finds `acme` and
 `aapi` finds `acme/api`; spaces only separate words. Profiles match on
 their name, user name and email, repositories on their path and profile.
 
+## Neovim
+
+The repository is also a Neovim plugin (0.10 or newer). With
+[lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{ "mwala-zm/gitenv", opts = {} }
+```
+
+- `:Gitenv` opens the TUI in a floating window on the buffer's repository.
+- `:GitenvApply [profile]` applies a profile, or the one the rules name,
+  with profile names completing on `Tab`.
+- `:GitenvStatus` shows what `gitenv status` prints, and
+  `:GitenvFixAuthors` re-authors unpushed commits in a floating terminal
+  that asks first.
+- Entering a buffer in a repository on the wrong profile warns you once;
+  `warn = "prompt"` offers to apply the right profile instead, and
+  `warn = false` keeps quiet.
+- `require("gitenv").statusline()` gives the `gitenv status --short` token
+  for your statusline, read in the background and cached, so it never
+  slows typing. With lualine:
+
+  ```lua
+  lualine_x = { { require("gitenv").statusline, color = require("gitenv").color } }
+  ```
+
+`:help gitenv` has the options and the Lua API, and `:checkhealth gitenv`
+checks that the binary is there. The plugin's tests run headless against
+a build: `cargo build && nvim --headless -u NONE -l tests/nvim/run.lua`.
+
 ## Profiles
 
 Profiles live in one TOML file:
@@ -375,6 +405,7 @@ gitenv export --install  # let git apply your rules itself
 gitenv hook install      # check every commit and push
 gitenv doctor            # check every profile's keys exist and log in
 gitenv fix-authors       # re-author unpushed commits made as someone else
+gitenv profiles          # profile names, one per line, for completion
 gitenv completions zsh   # shell completion script
 ```
 
