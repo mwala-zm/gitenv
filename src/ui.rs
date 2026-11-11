@@ -723,7 +723,10 @@ fn render_help(frame: &mut Frame) {
         ("w", "why this repo belongs to the profile it does"),
         ("c", "clone a repository onto the right profile"),
         ("R", "your commits by profile, this month and others"),
-        ("s", "list every repository next to this one"),
+        (
+            "s",
+            "list every repository next to this one, or go back to it",
+        ),
         ("?  h", "show this help"),
         ("q  Esc", "quit"),
         ("", ""),
@@ -1427,8 +1430,16 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             "authors  ".dim(),
             " ? ".bold(),
             "help  ".dim(),
-            " q ".bold(),
-            "quit".dim(),
+            if app.back_to_scan.is_some() {
+                " Esc ".bold()
+            } else {
+                " q ".bold()
+            },
+            if app.back_to_scan.is_some() {
+                "repos".dim()
+            } else {
+                "quit".dim()
+            },
         ]),
     };
     frame.render_widget(Paragraph::new(line), area);
@@ -1792,6 +1803,16 @@ mod tests {
             scroll: 0,
         }));
         insta::assert_snapshot!(draw(&app));
+    }
+
+    #[test]
+    fn the_footer_offers_the_way_back_to_the_list() {
+        let mut app = app(profiles(), Some(repo()));
+        app.back_to_scan = Some(Box::new(ScanView::new("/home/ada/work".into(), Vec::new())));
+        let screen = draw(&app);
+        let footer = screen.lines().last().unwrap();
+        assert!(footer.contains("Esc repos"), "{footer}");
+        assert!(!footer.contains("quit"), "{footer}");
     }
 
     #[test]

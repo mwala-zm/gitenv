@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `Esc` in a repository opened from the repository list goes back to the
+  list, where you left it, instead of quitting gitenv; so does `s`. The
+  footer says so.
+
 ## 0.4.0 (2026-11-07)
 
 The terminal UI now does nearly everything the command line does, and

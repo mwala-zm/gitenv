@@ -315,6 +315,7 @@ pub struct App {
     pub setup: Option<Setup>,
     pub known_repos: Option<Vec<Repo>>,
     pub last_change: Option<Undo>,
+    pub back_to_scan: Option<Box<ScanView>>,
 }
 
 impl App {
@@ -375,6 +376,7 @@ impl App {
             setup: None,
             known_repos: None,
             last_change: None,
+            back_to_scan: None,
         };
         app.check_health();
         app.check_setup();
@@ -410,6 +412,7 @@ impl App {
             setup: None,
             known_repos: None,
             last_change: None,
+            back_to_scan: None,
         }
     }
 
@@ -523,6 +526,9 @@ impl App {
             (KeyCode::Char('/'), _) => self.profile_filter.start(),
             (KeyCode::Esc, _) if self.profile_filter.is_active() => {
                 self.profile_filter.clear();
+            }
+            (KeyCode::Esc, _) | (KeyCode::Char('s'), _) if self.back_to_scan.is_some() => {
+                self.return_to_scan()
             }
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => self.should_quit = true,
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
@@ -882,7 +888,9 @@ impl App {
                 match git::discover(&root) {
                     Ok(Some(repo)) => {
                         self.repo = Some(repo);
-                        self.mode = Mode::Normal;
+                        if let Mode::Scan(view) = std::mem::replace(&mut self.mode, Mode::Normal) {
+                            self.back_to_scan = Some(view);
+                        }
                         self.select_active();
                         self.status = Some(format!("Opened {}", scan::tildify(&root)));
                     }
@@ -1482,6 +1490,16 @@ impl App {
         self.status = Some(status);
         self.refresh();
         self.select_active();
+    }
+
+    /// Goes back to the repository list a repository was opened from, with
+    /// its filter and place as they were, read again since a profile may
+    /// have been applied meanwhile.
+    fn return_to_scan(&mut self) {
+        if let Some(view) = self.back_to_scan.take() {
+            self.mode = Mode::Scan(view);
+            self.rescan();
+        }
     }
 
     fn refresh_export(&self) -> String {
@@ -2374,6 +2392,72 @@ mod tests {
         assert_eq!(view.period, 2);
         app.handle_key(KeyEvent::from(KeyCode::Esc));
         assert!(matches!(app.mode, Mode::Normal));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_repository_list_a_repo_was_opened_from() {
+        let base = std::env::temp_dir().join(format!("gitenv-app-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for name in ["api", "toy", "web"] {
+            let dir = base.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            fix_git(&dir, &["init", "-q"]);
+            fix_git(&dir, &["config", "--local", "user.name", "Ada"]);
+            fix_git(
+                &dir,
+                &["config", "--local", "user.email", "ada@example.com"],
+            );
+        }
+        let mut acme = profile("acme");
+        acme.email = "ada@acme.example".into();
+        let mut app = app_with("back", vec![profile("personal"), acme]);
+        app.scan_root = base.clone();
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('/')));
+        type_keys(&mut app, "w");
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.repo.as_ref().unwrap().root.file_name().unwrap(), "web");
+
+        app.selected = 1;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(
+            !app.should_quit,
+            "Esc quit instead of going back to the list"
+        );
+        let Mode::Scan(view) = &app.mode else {
+            panic!("Esc should return to the list");
+        };
+        assert_eq!(view.filter.query, "w", "the filter is kept");
+        assert_eq!(
+            view.current().unwrap().repo.root.file_name().unwrap(),
+            "web"
+        );
+        assert_eq!(
+            view.current().unwrap().status_word(),
+            "ok",
+            "the list is read again"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('o')));
+        app.handle_key(KeyEvent::from(KeyCode::Char('s')));
+        assert!(
+            matches!(&app.mode, Mode::Scan(v) if v.filter.query == "w"),
+            "s goes back too"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(app.mode, Mode::Normal));
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert!(
+            app.should_quit,
+            "with no list to go back to, Esc quits as before"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

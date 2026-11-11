@@ -20,7 +20,7 @@ expression: draw(&app)
 "│             │w         why this repo belongs to the profile it does            │             │"
 "│             │c         clone a repository onto the right profile               │             │"
 "│             │R         your commits by profile, this month and others          │me.example:  │"
-"│        _ _  │s         list every repository next to this one                  │             │"
+"│        _ _  │s         list every repository next to this one, or go back to it│             │"
 "│   __ _(_) |_│?  h      show this help                                          │             │"
 "│  / _` | | __│q  Esc    quit                                                    │             │"
 "│ | (_| | | |_│                                                                  │             │"

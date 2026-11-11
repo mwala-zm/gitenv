@@ -212,7 +212,9 @@ git is mid-rebase or the commits include a merge, the view says so instead.
 
 In the repository list (`s`), `Enter` applies the profile a rule claims for
 the highlighted repository, `o` opens it in the main view, `r` rescans and
-`Esc` goes back.
+`Esc` goes back. From a repository opened with `o`, `Esc` or `s` returns to
+the list where you left it, filter and all, read again so it shows what
+you just applied.
 
 To fix several at once, `space` marks the highlighted repository and `a`
 marks every wrong one shown (or, when they all are, none). `F` lists the
