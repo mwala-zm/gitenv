@@ -2416,7 +2416,7 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Char('s')));
         app.handle_key(KeyEvent::from(KeyCode::Char('/')));
-        type_keys(&mut app, "w");
+        type_keys(&mut app, "web");
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         app.handle_key(KeyEvent::from(KeyCode::Char('o')));
         assert!(matches!(app.mode, Mode::Normal));
@@ -2432,7 +2432,7 @@ mod tests {
         let Mode::Scan(view) = &app.mode else {
             panic!("Esc should return to the list");
         };
-        assert_eq!(view.filter.query, "w", "the filter is kept");
+        assert_eq!(view.filter.query, "web", "the filter is kept");
         assert_eq!(
             view.current().unwrap().repo.root.file_name().unwrap(),
             "web"
@@ -2446,7 +2446,7 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('o')));
         app.handle_key(KeyEvent::from(KeyCode::Char('s')));
         assert!(
-            matches!(&app.mode, Mode::Scan(v) if v.filter.query == "w"),
+            matches!(&app.mode, Mode::Scan(v) if v.filter.query == "web"),
             "s goes back too"
         );
 
